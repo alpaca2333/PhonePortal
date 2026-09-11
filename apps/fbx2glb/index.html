@@ -22,6 +22,7 @@
 
   <!-- Pick / drop. The <label> wraps the input so tapping anywhere in the zone opens the picker. -->
   <section class="card">
+    <div class="card-head"><h2>FBX 文件</h2></div>
     <label id="dropzone" class="dropzone" for="fileInput">
       <span class="dz-icon" aria-hidden="true">📦</span>
       <span class="dz-title">选择 .fbx 文件</span>
@@ -30,10 +31,29 @@
     </label>
     <div class="btn-row">
       <button id="sampleBtn" class="ghost" type="button">载入样例</button>
+      <button id="sampleTexBtn" class="ghost" type="button">载入样例（外部贴图）</button>
       <button id="clearBtn" class="ghost" type="button">清空</button>
       <span id="fileCount" class="hint"></span>
     </div>
     <ul id="fileList" class="list"></ul>
+  </section>
+
+  <!-- TEXTURES AS SEPARATE FILES. An FBX that references its textures by name (Blender / 3ds Max
+       exports) has nothing to resolve them against when you drop the .fbx alone, so the image files
+       are a second, optional input. Matching is by file name (see src/textures.ts). -->
+  <section class="card">
+    <div class="card-head">
+      <h2>配套贴图（可选）</h2>
+      <span id="textureCount" class="hint"></span>
+    </div>
+    <label id="texDropzone" class="dropzone small" for="textureInput">
+      <span class="dz-title">选择图片文件</span>
+      <span class="dz-hint">FBX 把贴图当外部文件引用时，把那些图片一起选进来（png / jpg / webp / bmp / gif）</span>
+      <input id="textureInput" type="file" accept="image/*" multiple hidden />
+    </label>
+    <ul id="textureList" class="list"></ul>
+    <p class="hint">按<b>文件名</b>匹配：忽略路径与大小写，扩展名不同也算（FBX 里写 <code>body.tga</code>、
+      你给 <code>body.png</code> 也能配上）。匹配结果写在日志里，没配上的会列出缺哪个名字。</p>
   </section>
 
   <section class="card">
@@ -130,8 +150,10 @@
         <code>idle</code>、<code>run</code>。</li>
       <li><strong>单位</strong>：Mixamo 的角色是 100 单位高的「厘米模型」，自动模式量出高度大于 20 就 ×0.01。
         预览显示的是原始尺寸，导出时才应用缩放。</li>
-      <li><strong>外部贴图</strong>：FBX 若把贴图作为<b>外部文件</b>引用，浏览器拿不到那些文件，产物会缺贴图
-        （内嵌贴图正常）。FBX 自带的材质颜色会保留。</li>
+      <li><strong>外部贴图</strong>：FBX 把贴图当外部文件引用时（Blender / 3ds Max 导出常见），把那些图片放进
+        「配套贴图」里，按文件名自动匹配并<b>内嵌进 GLB</b>；没提供的槽会空着，日志里会写清缺哪个名字。
+        <code>.tga</code> / <code>.psd</code> / <code>.dds</code> 浏览器解不了，给同名的
+        <code>.png</code> / <code>.jpg</code> 即可（按主干名匹配）。内嵌贴图本来就能正常转换。</li>
       <li><strong>不做</strong>：不居中、不修朝向、不改骨骼名、不重定向不同骨架的动画。</li>
       <li><strong>预览</strong>：需要 WebGL（真机确认项），手机上大模型转动可能掉帧。</li>
     </ul>

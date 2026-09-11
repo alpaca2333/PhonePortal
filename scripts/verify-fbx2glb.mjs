@@ -36,7 +36,7 @@
  *       node scripts/verify-fbx2glb.mjs
  * Exit code is non-zero when any assertion fails.
  */
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { registerHooks } from 'node:module';
 
@@ -72,12 +72,53 @@ if (typeof globalThis.FileReader === 'undefined') {
   };
 }
 
+// GLTFLoader reaches for the global `self` (the browser/worker global) when it has to turn an embedded
+// image bufferView into an object URL; Node has no `self`. Only the textured round trip needs it.
+if (typeof globalThis.self === 'undefined') globalThis.self = globalThis;
+
 // three's FileLoader dispatches a ProgressEvent, which Node does not define either. Only the .gltf
 // self-check reaches it (the binary path reads its buffer out of the GLB chunk with no fetch), so
 // this shim exists purely to let the non-binary round trip be asserted here.
 if (typeof globalThis.ProgressEvent === 'undefined') {
   globalThis.ProgressEvent = class ProgressEvent {
     constructor(type, init = {}) { this.type = type; Object.assign(this, init); }
+  };
+}
+
+// Headless stand-ins for the two browser APIs the texture path needs — an <img> that fires `load` for
+// blob:/data: URLs, and a canvas whose `toBlob` hands back real PNG bytes. Both are modelled on the
+// details that actually matter: a dispatched DOM event calls its listener with the ELEMENT as `this`
+// (three's ImageLoader reads `this` inside its handler), and the canvas only has to survive
+// `drawImage` + `toBlob`.
+const SAMPLE_PNG = readFileSync(new URL('../apps/fbx2glb/assets/sample_body_diffuse.png', import.meta.url));
+function fakeImage() {
+  const el = {
+    width: 4, height: 4, listeners: new Map(),
+    addEventListener(t, f) { if (!this.listeners.has(t)) this.listeners.set(t, []); this.listeners.get(t).push(f); },
+    removeEventListener() {},
+  };
+  Object.defineProperty(el, 'src', {
+    get() { return this._src; },
+    set(v) {
+      this._src = v;
+      setTimeout(() => {
+        const ok = String(v).startsWith('blob:') || String(v).startsWith('data:');
+        for (const f of this.listeners.get(ok ? 'load' : 'error') ?? []) f.call(el, { type: ok ? 'load' : 'error' });
+      }, 0);
+    },
+  });
+  return el;
+}
+function fakeCanvas() {
+  const ctx = {
+    translate() {}, scale() {}, putImageData() {}, drawImage() {},
+    createImageData: (w, h) => ({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h }),
+    getImageData: (x, y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h }),
+  };
+  return {
+    width: 1, height: 1, getContext: () => ctx,
+    toBlob: (cb, mime) => cb(new Blob([SAMPLE_PNG], { type: mime || 'image/png' })),
+    toDataURL: (mime) => 'data:' + (mime || 'image/png') + ';base64,' + Buffer.from(SAMPLE_PNG).toString('base64'),
   };
 }
 
@@ -99,6 +140,32 @@ function check(ok, label, detail = '') {
 }
 function section(title) { console.log('\n' + title); }
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
+
+// =============================================================================================
+// 0. 构建新鲜度：本脚本读 dist/，陈旧的 dist 只会测到上一个版本
+// =============================================================================================
+section('0. dist 是否比源码新（避免对着旧构建做验证）');
+{
+  const newestSource = (dir) => {
+    let newest = 0;
+    for (const name of readdirSync(dir, { withFileTypes: true })) {
+      const url = new URL(name.name + (name.isDirectory() ? '/' : ''), dir);
+      if (name.isDirectory()) newest = Math.max(newest, newestSource(url));
+      else {
+        const ext = name.name.split('.').pop();
+        if (['ts', 'html', 'css', 'json', 'fbx', 'png'].includes(ext)) {
+          newest = Math.max(newest, statSync(url).mtimeMs);
+        }
+      }
+    }
+    return newest;
+  };
+  const sourceTime = newestSource(APP);
+  const builtTime = statSync(new URL('../dist/apps/fbx2glb/main.js', import.meta.url)).mtimeMs;
+  check(builtTime >= sourceTime, 'dist/apps/fbx2glb 比 apps/fbx2glb 新（npm run dev 的 watcher 已完成重建）',
+    'source=' + new Date(sourceTime).toISOString() + ' built=' + new Date(builtTime).toISOString() +
+    (builtTime < sourceTime ? ' → 等 watcher 构建完（或 npm run build）后重跑' : ''));
+}
 
 // =============================================================================================
 // 1. 命名规则 (names.ts)
@@ -653,8 +720,9 @@ section('10. 产物不变量：本地转换、DOM 契约、vendor');
   check(!/XMLHttpRequest/.test(codeOnly), '不使用 XMLHttpRequest');
   check(!/new\s+FormData|new\s+Blob\(\[\s*form/.test(codeOnly), '不使用 FormData（没有上传路径）');
   const fetches = [...js.matchAll(/fetch\(([^)]*)/g)].map((m) => m[1].trim());
-  check(fetches.length === 1, '整个应用只有一处 fetch', fetches.join(' | '));
-  check(fetches.every((f) => f.includes('./assets/sample.fbx')), '那一处 fetch 只取内置样例');
+  check(fetches.length > 0 && fetches.length <= 3, 'fetch 调用点屈指可数（' + fetches.length + '）', fetches.join(' | '));
+  check(fetches.every((f) => f.includes("'./assets/")), '每一处 fetch 都指向应用自带的样例资源（用户文件永不上传/下载）',
+    fetches.join(' | '));
 
   const referenced = [...new Set([...js.matchAll(/vendor\/addons\/[A-Za-z0-9_/.\[\]-]+\.js/g)].map((m) => m[0]))];
   check(referenced.length >= 4, '源码里引用了 ' + referenced.length + ' 个 vendor addon');
@@ -732,8 +800,10 @@ section('11. 装配层：DOM shim 启动真实 main.js，跑完整用户流程')
   const created = [];
   globalThis.document = {
     getElementById: (id) => elements.get(id) ?? null,
-    createElement: (tag) => { const el = makeElement(tag, ''); created.push(el); return el; },
-    createElementNS: (_ns, tag) => { const el = makeElement(tag, ''); created.push(el); return el; },
+    // canvas + img are the two real browser APIs the export/texture path uses; everything else is a
+    // plain element stub.
+    createElement: (tag) => (tag === 'canvas' ? fakeCanvas() : (() => { const el = makeElement(tag, ''); created.push(el); return el; })()),
+    createElementNS: (_ns, tag) => (tag === 'img' ? fakeImage() : (() => { const el = makeElement(tag, ''); created.push(el); return el; })()),
     documentElement: makeElement('html', ''),
     body: makeElement('body', ''),
     addEventListener() {},
@@ -750,6 +820,13 @@ section('11. 装配层：DOM shim 启动真实 main.js，跑完整用户流程')
   const requests = [];
   globalThis.fetch = async (url, init = {}) => {
     requests.push({ url: String(url), init });
+    if (String(url).includes('sample-textured.fbx')) {
+      const bytes = readFileSync(new URL('../dist/apps/fbx2glb/assets/sample-textured.fbx', import.meta.url));
+      return { ok: true, status: 200, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) };
+    }
+    if (String(url).includes('sample_body_diffuse.png')) {
+      return { ok: true, status: 200, blob: async () => new Blob([SAMPLE_PNG], { type: 'image/png' }) };
+    }
     if (String(url).includes('sample.fbx')) {
       return { ok: true, status: 200, arrayBuffer: async () => sampleBuffer.slice(0) };
     }
@@ -785,7 +862,7 @@ section('11. 装配层：DOM shim 启动真实 main.js，跑完整用户流程')
     const fileMeta = elements.get('fileList').children[0].children[1].textContent;
     check(fileMeta.includes('2 动作') && fileMeta.includes('2 骨骼'), '列表行报告骨骼/动作数', fileMeta);
     check(elements.get('convertBtn').disabled === false, '有可解析文件后转换按钮可用');
-    check(logText().includes('样例已载入'), '日志记录了样例载入');
+    check(logText().includes('sample.fbx') && logText().includes('解析完成'), '日志记录了样例的读取与解析');
 
     // ---- 转换（默认：GLB + 合并 + 按文件名） ----
     elements.get('convertBtn').dispatch('click');
@@ -809,6 +886,22 @@ section('11. 装配层：DOM shim 启动真实 main.js，跑完整用户流程')
     const blob = objectUrls[objectUrls.length - 1];
     check(!!blob && blob.size > 1000, '下载的 Blob 有内容', blob ? names.formatBytes(blob.size) : 'none');
 
+    // ---- 外部贴图：经由「载入样例（外部贴图）」走一遍 UI ----
+    const logBefore = logText().length;
+    elements.get('sampleTexBtn').dispatch('click');
+    await settle(200);
+    check(elements.get('textureList').children.length === 1, '样例贴图出现在贴图列表里',
+      String(elements.get('textureList').children.length));
+    check(elements.get('textureCount').textContent.includes('1 张图片'), '贴图计数更新',
+      elements.get('textureCount').textContent);
+    const texRow = elements.get('fileList').children.map((r) => r.textContent).find((t) => t.includes('sample-textured.fbx')) ?? '';
+    check(texRow.includes('已补 1'), '文件行写明外部贴图已补上', texRow.slice(0, 140));
+    check(texRow.includes('缺') === false, '没有「缺贴图」的提示', texRow.slice(0, 140));
+    const texLog = logText().slice(logBefore);
+    check(texLog.includes('← 你提供的 sample_body_diffuse.png'), '日志写出「谁补了谁」', texLog.slice(0, 200));
+    check(elements.get('textureList').children[0].textContent.includes('已用于贴图'), '贴图行被标记为已使用',
+      elements.get('textureList').children[0].textContent);
+
     // ---- 改设置：写两个方向 + 防抖后 PUT 整个 scope ----
     const puts = [];
     const prevFetch = globalThis.fetch;
@@ -826,7 +919,6 @@ section('11. 装配层：DOM shim 启动真实 main.js，跑完整用户流程')
     check(puts[0]?.convert?.portrait?.format === 'gltf' && puts[0]?.convert?.landscape?.format === 'gltf',
       'PUT 里两个方向都是新值（值没有方向语义，见 settings.ts）', JSON.stringify(puts[0]?.convert));
     check(elements.get('saveState').textContent.includes('已保存'), '状态行显示已保存', elements.get('saveState').textContent);
-    check(elements.get('convertBtn').textContent.includes('GLTF'), '按钮文案跟着格式变', elements.get('convertBtn').textContent);
 
     // ---- 再转一次：扩展名跟着设置 ----
     elements.get('convertBtn').dispatch('click');
@@ -836,21 +928,24 @@ section('11. 装配层：DOM shim 启动真实 main.js，跑完整用户流程')
     check(elements.get('results').children.length === 1, '重新转换会清空上一次的产物');
 
     // ---- 多文件 + 「不合并」：一个输入一个产物，各自按自己的文件名命名 ----
+    const filesBefore = elements.get('fileList').children.length;
     const fi = elements.get('fileInput');
     fi.files = [new File([sampleBuffer.slice(0)], 'run.fbx', { type: 'application/octet-stream' })];
     fi.dispatch('change');
     await settle(80);
-    check(elements.get('fileList').children.length === 2, '通过文件选择框再加一个文件',
-      String(elements.get('fileList').children.length));
-    check(elements.get('convertBtn').textContent.includes('合并并转换（2 个）'),
+    check(elements.get('fileList').children.length === filesBefore + 1, '通过文件选择框再加一个文件',
+      filesBefore + ' → ' + elements.get('fileList').children.length);
+    check(elements.get('convertBtn').textContent.includes(`合并并转换（${filesBefore + 1} 个）`),
       '多个文件时按钮明说要合并', elements.get('convertBtn').textContent);
 
     elements.get('optMerge').checked = false;
     elements.get('optMerge').dispatch('change');
     await new Promise((r) => realSetTimeout(r, 600));
+    check(elements.get('convertBtn').textContent.includes('转换为 GLTF'),
+      '关掉合并后按钮改成单个产物的说法（扩展名跟随设置）', elements.get('convertBtn').textContent);
     elements.get('convertBtn').dispatch('click');
     await settle(150);
-    check(elements.get('results').children.length === 2, '关掉合并 → 一个输入一个产物',
+    check(elements.get('results').children.length === filesBefore + 1, '关掉合并 → 一个输入一个产物',
       String(elements.get('results').children.length));
     const outNames = elements.get('results').children.map((row) => row.children[0].children[0].textContent);
     check(outNames.some((n) => /^sample\.(glb|gltf)$/.test(n)) && outNames.some((n) => /^run\.(glb|gltf)$/.test(n)),
@@ -868,8 +963,25 @@ section('11. 装配层：DOM shim 启动真实 main.js，跑完整用户流程')
     await settle(150);
     check(elements.get('results').children.length === 1, '重新打开合并 → 又只剩一个产物');
     const mergedText = elements.get('results').children[0].textContent;
-    check(['sample', 'sample-2', 'run', 'run-2'].every((n) => mergedText.includes(n)),
-      '合并后四个动作名齐全且不重名', mergedText.slice(0, 140));
+    check(['sample', 'sample-2', 'sample-textured', 'run', 'run-2'].every((n) => mergedText.includes(n)),
+      '合并后每个输入的动作名齐全且不重名', mergedText.slice(0, 160));
+
+    // ---- 拖拽：按扩展名分流（FBX 与图片混着拖进来） ----
+    const filesBeforeDrop = elements.get('fileList').children.length;
+    const texturesBeforeDrop = elements.get('textureList').children.length;
+    elements.get('dropzone').dispatch('drop', {
+      dataTransfer: {
+        files: [
+          new File([sampleBuffer.slice(0)], 'dropped-run.fbx', { type: 'application/octet-stream' }),
+          new File([SAMPLE_PNG], 'dropped_body.png', { type: 'image/png' }),
+        ],
+      },
+    });
+    await settle(150);
+    check(elements.get('fileList').children.length === filesBeforeDrop + 1, '拖进来的 .fbx 进 FBX 列表',
+      filesBeforeDrop + ' → ' + elements.get('fileList').children.length);
+    check(elements.get('textureList').children.length === texturesBeforeDrop + 1, '拖进来的图片进贴图列表',
+      texturesBeforeDrop + ' → ' + elements.get('textureList').children.length);
 
     // ---- 恢复默认清空整组 ----
     const putsBeforeReset = puts.length;
@@ -887,11 +999,174 @@ section('11. 装配层：DOM shim 启动真实 main.js，跑完整用户流程')
     await settle();
     check(elements.get('fileList').children.length === 0 && elements.get('results').children.length === 0,
       '清空会同时清掉文件列表与产物');
+    check(elements.get('textureList').children.length === 0, '清空也会清掉贴图列表');
     check(elements.get('convertBtn').disabled === true, '清空后转换按钮再次禁用');
     globalThis.fetch = prevFetch;
   } finally {
     URL.createObjectURL = realCreateObjectURL;
     URL.revokeObjectURL = realRevoke;
+  }
+}
+
+// =============================================================================================
+// 12. 外部贴图：贴图与 FBX 分体时的匹配、加载与内嵌
+// =============================================================================================
+// The case this section exists for: an FBX whose material points at `sample_body_diffuse.png` as a
+// SIBLING FILE. Dropping the .fbx alone gives the loader nothing to resolve against; supplying the
+// image must (a) be matched by name, (b) go through the loader's own texture pipeline so the flags
+// (sRGB on the colour map, FBX wrap modes) are the loader's, not a second opinion, and (c) end up
+// EMBEDDED in the exported GLB, or the file is not self-contained any more.
+section('12. 外部贴图：名字匹配 → 材质槽 → 内嵌进 GLB');
+{
+  const textures = await import(new URL('../dist/apps/fbx2glb/src/textures.js', import.meta.url).href);
+  const pngBytes = SAMPLE_PNG;
+  const pngBlob = new Blob([pngBytes], { type: 'image/png' });
+
+  // ---- 12.1 纯规则 ----
+  check(textures.baseFileName('a\\b\\c.png') === 'c.png', '反斜杠路径也只取文件名', textures.baseFileName('a\\b\\c.png'));
+  check(textures.nameKey(' "C:\\T\\Body_Diffuse.PNG" ') === 'body_diffuse.png', '匹配键：去路径/引号/空格 + 小写',
+    textures.nameKey(' "C:\\T\\Body_Diffuse.PNG" '));
+  check(textures.stemKey('Body_Diffuse.PNG') === 'body_diffuse', '主干名去掉扩展名');
+  check(textures.extensionOf('a/b/c.PNG') === 'png', '扩展名小写化');
+  check(textures.extensionOf('noext') === '', '没有扩展名就是空串');
+  check(textures.isImageFileName('x.jpg') && textures.isImageFileName('X.JPEG') && !textures.isImageFileName('x.fbx') &&
+    !textures.isImageFileName('x.tga'), '图片扩展名判定（.tga 不在可解码列表里）');
+
+  const index = textures.buildTextureIndex([
+    { name: 'textures/Body_Diffuse.PNG', blob: pngBlob },
+    { name: 'other.png', blob: pngBlob },
+  ]);
+  check(textures.matchTexture(index, 'body_diffuse.png')?.rule === 'name', '按名字匹配（忽略路径与大小写）');
+  check(textures.matchTexture(index, 'Body_Diffuse.tga')?.rule === 'stem', '扩展名不同时按主干名匹配（.tga → .png）');
+  check(textures.matchTexture(index, 'nope.png') === null, '配不上就是 null（不会乱配）');
+  check(textures.matchTexture(index, '') === null, '空引用不匹配');
+  const dupIndex = textures.buildTextureIndex([
+    { name: 'a.png', blob: new Blob(['first']) },
+    { name: 'A.PNG', blob: new Blob(['second']) },
+  ]);
+  check(textures.matchTexture(dupIndex, 'a.png')?.entry.source === 'a.png', '重名文件以第一个为准（结果不依赖选择顺序）');
+
+  // ---- 12.2 URL 重写：把引用换成 blob: URL，让 loader 自己加载 ----
+  const report = textures.emptyTextureReport();
+  const session = textures.createTextureSession(index, report);
+  const manager = session.manager;
+  const resolved = manager.resolveURL('body_diffuse.png');
+  check(typeof resolved === 'string' && resolved.startsWith('blob:'), '外部引用被换成 blob: URL（loader 自己加载）', resolved);
+  check(report.requested.length === 1 && report.requested[0].provided === 'textures/Body_Diffuse.PNG',
+    '报告记录了「谁补了谁」', JSON.stringify(report.requested[0]));
+  const dataUrl = 'data:image/png;base64,AAAA';
+  check(manager.resolveURL(dataUrl) === dataUrl, '内嵌 data: URL 原样通过（不能被改写）');
+  const blobUrl = 'blob:http://x/y';
+  check(manager.resolveURL(blobUrl) === blobUrl, '已经是 blob: 的原样通过');
+  check(manager.resolveURL('missing.png') === 'missing.png', '没配上的原样返回（浏览器会 404，报告里记为缺）');
+  check(report.requested.length === 2 && report.requested[1].provided === null, '缺的那张也进了报告');
+  manager.resolveURL('body_diffuse.png');
+  check(report.requested.length === 2, '同一个名字问多少次都只记一条');
+
+  // ---- 12.3 槽位扫描与分类（合成场景） ----
+  const scene = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial();
+  mat.name = 'SynthMat';
+  const empty = new THREE.Texture();
+  empty.name = 'synth_diffuse.tga';
+  mat.map = empty;
+  scene.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mat));
+  check(textures.textureSlots(scene).length === 1, '扫描到 1 个纹理槽', String(textures.textureSlots(scene).length));
+  check(textures.pendingTextureSlots(scene).length === 1, '没有像素的槽算「待补」');
+  const synthReport = textures.emptyTextureReport();
+  await textures.applyTextureFallback(scene, index, synthReport, async () => ({ width: 8, height: 8 }));
+  check(synthReport.fallback.length === 0, '索引里没有合成名对应的文件 → 不回填');
+  const synthIndex = textures.buildTextureIndex([{ name: 'synth_diffuse.png', blob: pngBlob }]);
+  await textures.applyTextureFallback(scene, synthIndex, synthReport, async () => ({ width: 8, height: 8 }));
+  check(synthReport.fallback.length === 1 && synthReport.fallback[0].rule === 'stem',
+    '占位槽按主干名回填（.tga 引用 + .png 文件）', JSON.stringify(synthReport.fallback));
+  check(mat.map.image !== null && mat.map.version > 0, '回填后贴图有了像素并标记了更新（version 自增）',
+    'image=' + (mat.map.image !== null) + ' version=' + mat.map.version);
+  check(textures.finishTextureReport(scene, synthIndex, synthReport).withImage === 1, '终判：1 个槽有像素');
+
+  // ---- 12.4 真样例（不带贴图）：必须报告缺哪一张 ----
+  const texBytes = readFileSync(new URL('../dist/apps/fbx2glb/assets/sample-textured.fbx', import.meta.url));
+  const texBuffer = texBytes.buffer.slice(texBytes.byteOffset, texBytes.byteOffset + texBytes.byteLength);
+  const bare = await convert.parseFbx(texBuffer.slice(0), 'sample-textured.fbx', { textureTimeoutMs: 3000 });
+  check(textures.externalCounts(bare.textures).external === 1, '识别出 1 个外部贴图引用',
+    JSON.stringify(textures.externalCounts(bare.textures)));
+  check(bare.textures.requested[0]?.wanted === 'sample_body_diffuse.png', '引用名就是文件名',
+    bare.textures.requested[0]?.wanted);
+  check(textures.externalCounts(bare.textures).filled === 0, '没提供时为 0 张已补');
+  check(bare.textures.missing.length === 1, '报告里 1 个槽为空', JSON.stringify(bare.textures.missing));
+  check(textures.reportNeedsTextures(bare.textures), '「还缺贴图」为真（这会触发补图后的重新解析）');
+  check(textures.textureSummaryText(bare.textures).includes('缺 1'), '摘要里写明缺几张',
+    textures.textureSummaryText(bare.textures));
+  const bareMap = bare.root.getObjectByName('Body').material.map;
+  check(!!bareMap && bareMap.image === null, '材质槽存在但完全没有像素（就是「贴图丢了」的样子）');
+  check(bareMap.colorSpace === THREE.SRGBColorSpace, 'FBXLoader 已给颜色贴图标了 sRGB（回填也不能改掉）');
+  check(bare.clips.length === 2, '贴图缺失不影响动画解析');
+
+  // ---- 12.5 真样例（带贴图）：loader 自己加载 → 内嵌进 GLB ----
+  // Headless stand-ins for the two browser APIs this path needs: an <img> that fires load for
+  // blob:/data: URLs, and a canvas whose toBlob hands back real PNG bytes. Everything else (FBXLoader,
+  // the loading manager, GLTFExporter's image path) is the real thing.
+  const realDocument = globalThis.document;
+  globalThis.document = {
+    createElementNS: (_ns, tag) => (tag === 'img' ? fakeImage() : { style: {} }),
+    createElement: (tag) => (tag === 'canvas' ? fakeCanvas() : { style: {}, appendChild() {}, remove() {} }),
+    body: { appendChild() {}, removeChild() {} },
+    documentElement: { classList: { add() {}, remove() {}, toggle() {}, contains: () => false } },
+    getElementById: () => null,
+    addEventListener() {},
+  };
+  try {
+    const withTex = await convert.parseFbx(texBuffer.slice(0), 'sample-textured.fbx', {
+      textures: [{ name: 'sample_body_diffuse.png', blob: pngBlob }],
+      textureTimeoutMs: 3000,
+    });
+    check(!withTex.textures.timedOut, '等待贴图没有超时（loader 真的把它加载完了）');
+    check(textures.externalCounts(withTex.textures).filled === 1, '1 张外部贴图已补上');
+    check(withTex.textures.missing.length === 0, '不再有缺的槽');
+    check(withTex.textures.fallback.length === 0, '走的是主路线（loader 自己加载），不需要按名回填');
+    const map = withTex.root.getObjectByName('Body').material.map;
+    check(!!map && map.image !== null && map.image !== undefined, '材质槽拿到了真实图像对象');
+    check(map.colorSpace === THREE.SRGBColorSpace, '颜色贴图的 sRGB 标记由 FBXLoader 设置（不是我们另写一套）');
+    check(map.wrapS === THREE.RepeatWrapping && map.wrapT === THREE.RepeatWrapping,
+      '包裹模式来自 FBX 的 wrap 设置');
+    check(map.flipY === true, 'flipY 与内嵌贴图路径一致（同一个 loader 代码）');
+    check(textures.providedFileNames(withTex.textures)[0] === 'sample_body_diffuse.png', '报告列出补图来源');
+    check(!textures.reportNeedsTextures(withTex.textures), '补齐后不再需要重新解析');
+
+    // export it and look INSIDE the written GLB
+    const out = await convert.exportScene(withTex.root, {
+      format: 'glb', animations: withTex.clips, scale: 1,
+    });
+    const buf = Buffer.from(await out.blob.arrayBuffer());
+    const jsonLength = buf.readUInt32LE(12);
+    const json = JSON.parse(buf.subarray(20, 20 + jsonLength).toString('utf8'));
+    check((json.images ?? []).length === 1, 'GLB 内嵌了 1 张图片', JSON.stringify((json.images ?? []).map((i) => i.mimeType)));
+    check(json.images[0].mimeType === 'image/png', 'MIME 是 image/png', json.images[0].mimeType);
+    check(json.images[0].bufferView !== undefined && json.images[0].uri === undefined,
+      '图片是 bufferView（真正嵌进 BIN），不是外部 uri');
+    check(!JSON.stringify(json).includes('"uri"'), '整份 JSON 依然没有 uri（自包含）');
+    check((json.textures ?? []).length >= 1 && (json.samplers ?? []).length >= 1, '写出了 texture + sampler');
+    const bodyMat = json.materials.find((m) => m.name === 'BodyMat');
+    check(!!bodyMat?.pbrMetallicRoughness?.baseColorTexture, '材质真的挂上了 baseColorTexture',
+      JSON.stringify(bodyMat?.pbrMetallicRoughness));
+    check(bodyMat.pbrMetallicRoughness.baseColorTexture.index === 0, 'baseColorTexture 指向那张图');
+    const binChunk = (() => {
+      let offset = 20 + jsonLength;
+      while (offset + 8 <= buf.length) {
+        const length = buf.readUInt32LE(offset);
+        const type = buf.readUInt32LE(offset + 4);
+        if (type === 0x004e4942) return buf.subarray(offset + 8, offset + 8 + length);
+        offset += 8 + length;
+      }
+      return null;
+    })();
+    check(!!binChunk && binChunk.includes(Buffer.from([0x89, 0x50, 0x4e, 0x47])),
+      'BIN chunk 里能找到 PNG 魔数（图片字节真的在文件里）');
+    const check2 = await convert.selfCheck(await out.blob.arrayBuffer());
+    check(!('error' in check2) && check2.bones === 2 && JSON.stringify(check2.clipNames) === JSON.stringify(['mixamo.com', 'mixamo.com']),
+      '带贴图的产物照样能被 GLTFLoader 读回', 'error' in check2 ? check2.error : JSON.stringify(check2));
+  } finally {
+    globalThis.document = realDocument;
   }
 }
 

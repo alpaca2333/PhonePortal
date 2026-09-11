@@ -5,13 +5,16 @@
  *
  * THE PIPELINE, once, for the record:
  *   File → ArrayBuffer → FBXLoader.parse → { root, clips }
+ *        → textures.ts resolves the FBX's external texture references against the image files the
+ *          user supplied (blob: URLs through the loader's own resolveURL hook),
  *        → describeScene (report + height)
  *        → mergeScenes (pick the character, attach & rename the other files' clips)
  *        → resolveScale (units.ts) → GLTFExporter.parse → Blob
  *        → GLTFLoader.parse (self-check: what did we actually write?)
  *        → download link. No byte of it leaves the device.
  */
-import { parseFbx, loadFbxFile, exportScene, selfCheck, downloadBlob, type SelfCheck } from './src/convert.js';
+import { parseFbx, loadFbxFile, exportScene, selfCheck, downloadBlob,
+  type ParsedFbx, type SelfCheck } from './src/convert.js';
 import { describeScene, type SceneReport } from './src/analyze.js';
 import { mergeScenes, nameClipsForFile, renameClips, type LoadedFbx } from './src/merge.js';
 import { formatBytes, outputFileName } from './src/names.js';
@@ -19,6 +22,10 @@ import { resolveScale, scaleLabel, type ScaleDecision } from './src/units.js';
 import { createPanel, type PanelHandle } from './src/panel.js';
 import { createPreview, type PreviewHandle } from './src/preview.js';
 import type { ConvertSettings, PreviewSettings } from './src/settings.js';
+import {
+  IMAGE_EXTENSIONS, externalCounts, isImageFileName, providedFileNames, reportNeedsTextures,
+  textureSummaryText, type TextureReport,
+} from './src/textures.js';
 
 const byId = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 
@@ -37,6 +44,11 @@ const previewCanvas = byId<HTMLCanvasElement>('previewCanvas');
 const previewFallback = byId<HTMLElement>('previewFallback');
 const clipSelect = byId<HTMLSelectElement>('clipSelect');
 const playBtn = byId<HTMLButtonElement>('playBtn');
+const textureInput = byId<HTMLInputElement>('textureInput');
+const texDropzone = byId<HTMLLabelElement>('texDropzone');
+const textureListEl = byId<HTMLUListElement>('textureList');
+const textureCountEl = byId<HTMLElement>('textureCount');
+const sampleTexBtn = byId<HTMLButtonElement>('sampleTexBtn');
 
 // ---- log -------------------------------------------------------------------------------------
 const MAX_LOG_LINES = 200;
@@ -57,6 +69,8 @@ interface Item {
   state: 'queued' | 'parsing' | 'ready' | 'error';
   loaded?: LoadedFbx;
   report?: SceneReport;
+  /** What happened to this file's textures (see textures.ts) — drives the row + the log. */
+  textures?: TextureReport;
   error?: string;
 }
 
@@ -86,13 +100,15 @@ function renderList(): void {
     else if (item.state === 'queued') meta.textContent = formatBytes(item.size) + ' · 排队中';
     else if (item.report) {
       const r = item.report;
+      const tex = item.textures ? textureSummaryText(item.textures) : '';
       meta.textContent = [
         formatBytes(item.size),
         `${r.meshes} 网格${r.skinned ? `（${r.skinned} 蒙皮）` : ''}`,
         `${r.bones} 骨骼`,
         `${r.clips.length} 动作`,
         `高 ${r.size.y.toFixed(3)}`,
-      ].join(' · ');
+        tex,
+      ].filter((x) => x !== '').join(' · ');
     }
     li.appendChild(meta);
 
@@ -126,28 +142,84 @@ function updateConvertState(): void {
     : '转换为 ' + format;
 }
 
-/** Parse one file and fold it into the list. Parsing happens on ADD, so the report is ready. */
-async function addFile(file: File): Promise<void> {
-  const item: Item = { id: nextId++, file, size: file.size, state: 'parsing' };
-  items.push(item);
+/**
+ * The image files the user supplied next to the FBX. Session state on purpose: a picked File cannot be
+ * persisted (no file handles survive a reload), and the FBX list is session state for the same reason.
+ */
+const textureFiles: { name: string; blob: Blob; size: number }[] = [];
+
+/** One texture's fate, in the log — so a wrong match is visible immediately, not after a download. */
+function logTextureReport(name: string, report: TextureReport): void {
+  const { external, filled } = externalCounts(report);
+  if (external === 0 && report.withImage === 0) return;
+  if (external === 0) {
+    log(`${name}：贴图 ${report.withImage} 张（已嵌在 FBX 里或由 loader 直接解析）`);
+  } else {
+    for (const req of report.requested) {
+      if (req.provided) {
+        log(`${name}：贴图 ${req.wanted} ← 你提供的 ${req.provided}` +
+          `${req.rule === 'stem' ? '（文件名不完全一致，按主干名匹配）' : ''}`, 'ok');
+      } else {
+        log(`${name}：贴图 ${req.wanted} 没有提供，产物里这个贴图槽会空着`, 'warn');
+      }
+    }
+    void filled;
+  }
+  for (const p of report.placeholders) {
+    log(`${name}：${p.material}.${p.slot} 是 three 不支持的贴图格式（.tga/.psd/.dds 占位），` +
+      `提供同名的 .png/.jpg 可以补上`, 'warn');
+  }
+  if (report.fallback.length > 0) {
+    log(`${name}：按名字回填了 ${report.fallback.length} 个占位贴图槽` +
+      `（${report.fallback.map((f) => `${f.material}.${f.slot} ← ${f.from}`).join('、')}）`, 'ok');
+  }
+  if (report.timedOut) log(`${name}：等待贴图加载超时，未完成的贴图槽会保持为空`, 'warn');
+  if (report.unused.length > 0) {
+    log(`${name}：有 ${report.unused.length} 个贴图文件没被这个 FBX 引用（${report.unused.join('、')}）`, 'warn');
+  }
+}
+
+/** Parse (or re-parse) one list entry. Parsing happens on ADD, so the report is ready before convert. */
+async function parseInto(item: Item): Promise<void> {
+  item.state = 'parsing';
+  item.error = undefined;
   renderList();
-  log(`读取 ${file.name}（${formatBytes(file.size)}）…`);
+  const previous = item.loaded as ParsedFbx | undefined;
   try {
-    const loaded = await loadFbxFile(file);
+    const loaded = await loadFbxFile(item.file, { textures: textureFiles });
+    // A re-parse (textures changed) leaves the previous index's blob: URLs behind; release them.
+    // Safe even while the old images are on screen: a decoded image does not need its URL any more.
+    previous?.textureIndex?.dispose();
     item.loaded = loaded;
+    item.textures = loaded.textures;
     item.report = describeScene(loaded.root, loaded.clips);
     item.state = 'ready';
     const r = item.report;
     log(`解析完成：${r.meshes} 个网格、${r.bones} 根骨骼、${r.clips.length} 个动作片段、` +
       `包围盒 ${r.size.x.toFixed(2)}×${r.size.y.toFixed(2)}×${r.size.z.toFixed(2)}`, 'ok');
     if (r.clips.length === 0) log('这个文件里没有动画（只会导出模型）', 'warn');
-    if (!previewSource) { previewSource = loaded; setPreview(loaded.root, loaded.clips); }
+    logTextureReport(item.file.name, loaded.textures);
+    if (!previewSource || previewSource.file === item.file.name) {
+      previewSource = loaded;
+      setPreview(loaded.root, loaded.clips);
+    }
   } catch (err) {
     item.state = 'error';
     item.error = err instanceof Error ? err.message : String(err);
-    log(`解析失败 ${file.name}：${item.error}`, 'error');
+    log(`解析失败 ${item.file.name}：${item.error}`, 'error');
   }
   renderList();
+  // The texture rows say whether each supplied file was actually used, which is only known AFTER a
+  // parse — so they have to be re-rendered here, not just when the texture list changes.
+  renderTextures();
+}
+
+async function addFile(file: File): Promise<void> {
+  const item: Item = { id: nextId++, file, size: file.size, state: 'queued' };
+  items.push(item);
+  renderList();
+  log(`读取 ${file.name}（${formatBytes(file.size)}）…`);
+  await parseInto(item);
 }
 
 // ---- preview ---------------------------------------------------------------------------------
@@ -405,6 +477,12 @@ fileInput.addEventListener('change', () => {
   void addAll(files);
 });
 
+textureInput.addEventListener('change', () => {
+  const files = Array.from(textureInput.files ?? []);
+  textureInput.value = '';
+  void addTextures(files);
+});
+
 async function addAll(files: readonly File[]): Promise<void> {
   if (files.length === 0) return;
   for (const file of files) {
@@ -414,48 +492,141 @@ async function addAll(files: readonly File[]): Promise<void> {
   }
 }
 
-// Drag & drop on the whole drop zone (a phone rarely drags, a desktop often does).
-for (const type of ['dragenter', 'dragover']) {
-  dropzone.addEventListener(type, (e) => { e.preventDefault(); dropzone.classList.add('over'); });
-}
-for (const type of ['dragleave', 'drop']) {
-  dropzone.addEventListener(type, () => dropzone.classList.remove('over'));
-}
-dropzone.addEventListener('drop', (e) => {
-  e.preventDefault();
-  const dt = (e as DragEvent).dataTransfer;
-  if (!dt) return;
-  void addAll(Array.from(dt.files ?? []));
-});
-
-sampleBtn.addEventListener('click', () => {
-  void (async () => {
-    try {
-      log('载入内置样例（一个 2 骨骼蒙皮盒子 + 两个动作）…');
-      const res = await fetch('./assets/sample.fbx', { cache: 'no-store' });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const buffer = await res.arrayBuffer();
-      const loaded = await parseFbx(buffer, 'sample.fbx');
-      const report = describeScene(loaded.root, loaded.clips);
-      const file = new File([buffer], 'sample.fbx', { type: 'application/octet-stream' });
-      items.push({ id: nextId++, file, size: buffer.byteLength, state: 'ready', loaded, report });
-      log(`样例已载入：${report.bones} 根骨骼、${report.clips.length} 个动作`, 'ok');
-      renderList();
-      previewSource = loaded;
-      setPreview(loaded.root, loaded.clips);
-    } catch (err) {
-      log('样例载入失败：' + (err instanceof Error ? err.message : String(err)), 'error');
+/**
+ * Add image files to the texture list, then RE-PARSE every FBX that was still missing something.
+ * Textures are matched while the FBX is parsed (textures.ts), so "I forgot the textures, now I have
+ * them" has to run the parse again — and only the files that actually need it, because a Mixamo-sized
+ * FBX parse is not free.
+ */
+async function addTextures(files: readonly File[]): Promise<void> {
+  let added = 0;
+  for (const file of files) {
+    if (!isImageFileName(file.name)) {
+      log(`${file.name} 不是图片（支持 ${IMAGE_EXTENSIONS.join('/')}），已忽略`, 'warn');
+      continue;
     }
+    const entry = { name: file.name, blob: file as Blob, size: file.size };
+    const at = textureFiles.findIndex((t) => t.name.toLowerCase() === file.name.toLowerCase());
+    if (at >= 0) textureFiles[at] = entry;
+    else textureFiles.push(entry);
+    added++;
+  }
+  if (added === 0) return;
+  renderTextures();
+  const stale = items.filter((i) => i.state === 'ready' && i.textures && reportNeedsTextures(i.textures!));
+  if (stale.length > 0) {
+    log(`贴图已更新，重新解析 ${stale.length} 个还在缺贴图的 FBX…`);
+    for (const item of stale) {
+      await parseInto(item);
+      await new Promise((r) => setTimeout(r, 0));
+    }
+  }
+}
+
+function renderTextures(): void {
+  textureListEl.textContent = '';
+  textureCountEl.textContent = textureFiles.length === 0 ? '还没有贴图' : `${textureFiles.length} 张图片`;
+  const used = new Set<string>();
+  for (const item of items) {
+    if (!item.textures) continue;
+    for (const name of providedFileNames(item.textures)) used.add(name.toLowerCase());
+  }
+  for (const tf of textureFiles) {
+    const li = document.createElement('li');
+    li.className = 'file-row ready';
+    const name = document.createElement('span');
+    name.className = 'file-name';
+    name.textContent = tf.name;
+    li.appendChild(name);
+    const meta = document.createElement('span');
+    meta.className = 'file-meta';
+    meta.textContent = formatBytes(tf.size) +
+      (used.has(tf.name.toLowerCase()) ? ' · 已用于贴图' : ' · 还没被任何 FBX 引用');
+    li.appendChild(meta);
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'ghost small';
+    remove.textContent = '✕';
+    remove.title = '移除';
+    remove.addEventListener('click', () => {
+      const at = textureFiles.indexOf(tf);
+      if (at >= 0) textureFiles.splice(at, 1);
+      renderTextures();
+    });
+    li.appendChild(remove);
+    textureListEl.appendChild(li);
+  }
+  updateConvertState();
+}
+
+/** Drag & drop: route by extension, textures FIRST so a single drop of FBX + images parses once. */
+function bindDropzone(el: HTMLElement, onFiles: (files: File[]) => void): void {
+  for (const type of ['dragenter', 'dragover']) {
+    el.addEventListener(type, (e) => { e.preventDefault(); el.classList.add('over'); });
+  }
+  for (const type of ['dragleave', 'drop']) {
+    el.addEventListener(type, () => el.classList.remove('over'));
+  }
+  el.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const dt = (e as DragEvent).dataTransfer;
+    if (!dt) return;
+    onFiles(Array.from(dt.files ?? []));
+  });
+}
+
+bindDropzone(dropzone, (files) => {
+  const fbx = files.filter((f) => f.name.toLowerCase().endsWith('.fbx'));
+  const images = files.filter((f) => isImageFileName(f.name));
+  const other = files.filter((f) => !fbx.includes(f) && !images.includes(f));
+  if (other.length > 0) {
+    log(`忽略了 ${other.length} 个既不是 .fbx 也不是图片的文件：${other.map((f) => f.name).join('、')}`, 'warn');
+  }
+  void (async () => {
+    if (images.length > 0) await addTextures(images);
+    if (fbx.length > 0) await addAll(fbx);
   })();
 });
 
+bindDropzone(texDropzone, (files) => { void addTextures(files); });
+
+/**
+ * The built-in samples. There are two on purpose: the plain one shows the minimal pipeline, and the
+ * textured one references `sample_body_diffuse.png` as an EXTERNAL file — the exact situation the
+ * texture list exists for — so the whole feature can be seen on a device without hunting for a
+ * Blender export. Note this is the ONLY place the app fetches anything: its own bundled assets.
+ */
+async function loadSample(fbxName: string, textureName: string | null): Promise<void> {
+  try {
+    log(`载入内置样例 ${fbxName}${textureName ? '（含外部贴图引用）' : ''}…`);
+    if (textureName) {
+      const texRes = await fetch('./assets/' + textureName, { cache: 'no-store' });
+      if (!texRes.ok) throw new Error('贴图 HTTP ' + texRes.status);
+      const texBlob = await texRes.blob();
+      await addTextures([new File([texBlob], textureName, { type: texBlob.type || 'image/png' })]);
+    }
+    const res = await fetch('./assets/' + fbxName, { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const buffer = await res.arrayBuffer();
+    await addFile(new File([buffer], fbxName, { type: 'application/octet-stream' }));
+  } catch (err) {
+    log(`样例载入失败：${err instanceof Error ? err.message : String(err)}`, 'error');
+  }
+}
+
+sampleBtn.addEventListener('click', () => { void loadSample('sample.fbx', null); });
+sampleTexBtn.addEventListener('click', () => { void loadSample('sample-textured.fbx', 'sample_body_diffuse.png'); });
+
 clearBtn.addEventListener('click', () => {
+  for (const item of items) (item.loaded as ParsedFbx | undefined)?.textureIndex?.dispose();
   items.length = 0;
+  textureFiles.length = 0;
   outputs.length = 0;
   usedOutputNames.clear();
   previewSource = null;
   preview?.clear();
   renderClips();
+  renderTextures();
   renderList();
   renderResults();
   log('已清空列表');
@@ -465,6 +636,8 @@ convertBtn.addEventListener('click', () => { void convert(); });
 
 // ---- boot ------------------------------------------------------------------------------------
 renderList();
+renderTextures();
 renderResults();
 renderClips();
 log('选择 .fbx 文件即可开始；多个 Mixamo 动作文件可以合并成一个 glb。');
+log('FBX 的贴图如果是外部文件（Blender/3ds Max 导出常见），把那些图片也一起选进来，按文件名自动匹配。');

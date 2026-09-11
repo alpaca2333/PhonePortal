@@ -198,7 +198,7 @@ apps/<你的应用id>/
 - ⏰ **时钟**（`apps/clock`）：实时时钟 + 秒表。
 - 🧮 **计算器**（`apps/calculator`）：支持 `+ - × ÷ %`、括号解析的正确计算器，无需网络。
 - 🕳️ **黑洞**（`apps/blackhole`）：WebGL2 逐像素光线追踪，积分 Schwarzschild 光子测地线（已校验：捕获临界碰撞参数 ≈2.6rs），呈现真实引力透镜、吸积盘多普勒增亮/引力红移与光子环。
-- 🧊 **FBX → GLB**（`apps/fbx2glb`）：**在浏览器里把 FBX 转成 glTF/GLB**（three r160 本地 vendor 的 `FBXLoader` + `GLTFExporter` + `GLTFLoader`），支持**把多个 Mixamo 动作文件合并成一个自带全部动作的角色文件**（自动挑出带蒙皮的角色本体、按骨骼名匹配重定向另一个批次的骨架、按文件名给动作命名并处理 Mixamo 那个每次都叫 `mixamo.com` 的占位 take 名、按实测高度自动做厘米→米缩放），导出后**用 `GLTFLoader` 重新读回来自检**，全程**不上传**（有源码级断言）；带 WebGL 预览（无 WebGL 时降级为说明文字）。设置两组存服务器。
+- 🧊 **FBX → GLB**（`apps/fbx2glb`）：**在浏览器里把 FBX 转成 glTF/GLB**（three r160 本地 vendor 的 `FBXLoader` + `GLTFExporter` + `GLTFLoader`），支持**贴图与 FBX 分体时按文件名补齐并内嵌进产物**，以及**把多个 Mixamo 动作文件合并成一个自带全部动作的角色文件**（自动挑出带蒙皮的角色本体、按骨骼名匹配重定向另一个批次的骨架、按文件名给动作命名并处理 Mixamo 那个每次都叫 `mixamo.com` 的占位 take 名、按实测高度自动做厘米→米缩放），导出后**用 `GLTFLoader` 重新读回来自检**，全程**不上传**（有源码级断言）；带 WebGL 预览（无 WebGL 时降级为说明文字）。设置两组存服务器。
   - 完整设计决策（含「导出缩放为什么必须加在成品 JSON 上」「`Box3.setFromObject` 对 SkinnedMesh 会二次乘」两个真坑）、设置键名表、许可证见 **[`apps/fbx2glb/README.md`](apps/fbx2glb/README.md)**。
 - 🎯 **射击竞技场**（`apps/shooter`）：**76×76 室内掩体射击（PvE 枪战）**，俯视角三人称（**左摇杆移动 / 右下大面积透明「视角区」转视角 / 独立开火键，角色永远朝摄像机前方**），Three.js（本地 vendor）+ glTF 骨骼动画 + 卡通渲染/角色描边。场景为 Kenney Furniture Kit 室内房间（CC0，49 个 `.glb` 仅 541KB），地上 **20 块掩体同时挡人、挡子弹、挡刀、挡火箭溅射**；敌人以**枪手为主**（见面先瞄 `0.5s`、预警线亮起、然后**照着自己那把冲锋枪的配置打空一梭子再换弹**，武器的射速/弹夹/换弹/散布全部复用 `weapons.ts` 的同一张表）+ 少量近战冲锋。**背包 / 武器 / 备弹 / 护甲穿透（1–6 级）**全部数据驱动（4 把武器：龙息喷 / 冲锋枪 / 火箭筒 / 砍刀），**视野遮挡与命中判定共用同一套视线函数**（能打到你的敌人一定看得见），模拟/渲染分离，设置分六组存服务器，`?diag=1` 打开内置卡顿剖析。声明了 `"orientation": "landscape"`。
   - 完整设计决策、设置键名表、美术资源清单与踩坑记录见 **[`apps/shooter/README.md`](apps/shooter/README.md)**（本行只保留概览）。
@@ -225,7 +225,7 @@ apps/<你的应用id>/
 | --- | --- | --- | --- |
 | [Three.js](https://threejs.org) r160（`three.module.min.js` + `GLTFLoader` / `BufferGeometryUtils` / `SkeletonUtils`） | `apps/shooter/vendor/` | MIT | 本地 vendor，无 CDN 依赖；文件头保留 `@license` 声明 |
 | [Three.js](https://threejs.org) r160（`three.module.min.js` + `FBXLoader` / `GLTFExporter` / `GLTFLoader` / `OrbitControls` 等 addon） | `apps/fbx2glb/vendor/` | MIT | 与射击子应用的 vendor 是同版本（md5 相同，验证脚本会断言）；清单与获取方式见该目录 `README.md` |
-| `sample.fbx`（2 骨骼蒙皮盒子 + 两个 take 的 ASCII FBX 样例） | `apps/fbx2glb/assets/` | 本仓库自有 | 手写，无第三方素材；同时是验证脚本的输入 |
+| `sample.fbx`、`sample-textured.fbx`（2 骨骼蒙皮盒子 + 两个 take 的 ASCII FBX 样例，后者引用一张外部贴图）、`sample_body_diffuse.png`（4×4，81 字节） | `apps/fbx2glb/assets/` | 本仓库自有 | 手写/零依赖生成，无第三方素材；同时是验证脚本的输入 |
 | Quaternius「Cyberpunk Pack」人形 `cyber_human.glb` | `apps/shooter/assets/models/` | CC0 1.0 | 可商用、可再分发、无需署名 |
 | [Kenney](https://kenney.nl/assets/furniture-kit)「Furniture Kit」49 个室内道具 `.glb` | `apps/shooter/assets/props/` | CC0 1.0 | 完整来源 / 文件清单 / 再下载说明见同目录 `SOURCE.txt` |
 

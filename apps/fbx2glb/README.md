@@ -1,7 +1,7 @@
 # 🧊 FBX → GLB（`apps/fbx2glb`）
 
 **在浏览器里把 FBX 转成 glTF / GLB，并把多个 Mixamo 动作文件合并成一个自带全部动作的角色文件。**
-解析、合并、导出、自检全部发生在本机页面里——**模型文件一个字节都不上传**。
+解析、合并、贴图匹配、导出、自检全部发生在本机页面里——**模型文件一个字节都不上传**。
 
 它存在的理由很具体：Mixamo 每个动作只能单独下载一个 FBX（而且每个文件的 take 都叫 `mixamo.com`），
 而消费方（比如 [射击子应用](../shooter/README.md) 的 `characters.ts`）需要的是**一个**自包含、
@@ -15,11 +15,16 @@
 
 1. **选文件**：点「选择 .fbx 文件」（可多选），或把文件拖进虚线框；没有文件时点「载入样例」——
    会从 `./assets/sample.fbx` 载入内置的 2 骨骼蒙皮样例，用来验证整条链路。
-2. **看报告**：每个文件立刻解析并列出「网格 / 骨骼 / 动作 / 包围盒高度」，解析失败的文件会标红并说明原因。
+2. **看报告**：每个文件立刻解析并列出「网格 / 骨骼 / 动作 / 包围盒高度 / 贴图」，解析失败的文件会标红并说明原因。
+   如果日志说「贴图 X 没有提供」，就到下面的「配套贴图」里把那张图片选进来（见 3.10）——文件会被自动重新解析。
 3. **选选项**（默认值就是 Mixamo 工作流，一般不用改）：GLB · 合并 · 导出动画 · 自动缩放 · 按文件名命名。
 4. **点「转换为 GLB」**：产物行显示动作名、缩放、以及**自检结果**（把写出的文件用 three 的 `GLTFLoader`
    重新读一遍，报出它实际看到的网格/骨骼/动作/高度）。
 5. **下载**：每个产物一个下载按钮（Blob URL，本地生成）。
+
+> 没有现成文件时有两个内置样例：「载入样例」是最小的 2 骨骼蒙皮盒子；「载入样例（外部贴图）」
+> 是一个**贴图与 FBX 分体**的样例（材质引用 `sample_body_diffuse.png`，按外部文件解析），
+> 用来一条链路看清「缺贴图 → 补上 → 内嵌进 GLB」的完整过程。
 
 ### 推荐的 Mixamo 工作流
 
@@ -48,13 +53,17 @@ apps/fbx2glb/
 │  ├─ names.ts           # ★纯：文件名/动作名规则（占位名、去重、净化、CJK、下载名、字节格式）
 │  ├─ units.ts           # ★纯：单位缩放判定（auto / keep / cm）
 │  ├─ rig.ts             # ★纯：骨骼名匹配（精确 → 归一化，「有歧义就拒绝猜」）与轨道名重写
+│  ├─ textures.ts        # 外部贴图：名字匹配（★纯）、LoadingManager 的 URL 重写、占位槽回填、贴图报告
 │  ├─ settings.ts        # ★纯：设置 schema（两组、默认值、稀疏覆盖、脏数据、钳制）
 │  ├─ merge.ts           # 合并规则：挑本体、覆盖率门、重定向轨道、改名（用 three 的 AnimationClip）
 │  ├─ analyze.ts         # 场景报告：计数/尺寸/骨骼名/每个 clip 的未绑定轨道（three，无 DOM）
 │  ├─ convert.ts         # FBXLoader / GLTFExporter / GLTFLoader 封装 + GLB 容器数学（缩放）
 │  ├─ preview.ts         # ★唯一需要 WebGL 的模块：渲染 + OrbitControls + AnimationMixer
 │  └─ panel.ts           # 选项 DOM + 服务器持久化（防抖、恢复默认、失败降级）
-└─ assets/sample.fbx     # 手写的 ASCII FBX 样例（也是验证脚本的输入；见第 5 节）
+└─ assets/
+   ├─ sample.fbx               # 手写 ASCII FBX 样例：2 骨骼蒙皮 + 两个 take（验证脚本的输入）
+   ├─ sample-textured.fbx      # 同上，但材质引用一张**外部**贴图（贴图分体那条路的样例）
+   └─ sample_body_diffuse.png  # 4×4 的 81 字节 PNG（上面那张外部贴图，也是验证脚本的图片）
 ```
 
 （★ = 无 DOM，可被 `scripts/verify-fbx2glb.mjs` 在 Node 里直接跑。）
@@ -62,7 +71,8 @@ apps/fbx2glb/
 **数据流（一条直线，没有隐藏状态）**：
 
 ```
-File ──arrayBuffer──▶ FBXLoader.parse ──▶ { root, clips }
+File ──arrayBuffer──▶ FBXLoader(带 URL 重写的 LoadingManager).parse ──▶ { root, clips }
+        ↑ 配套贴图 ──▶ textures.ts 的名字索引            外部贴图引用在这里被换成 blob: URL
                                           │
                           describeScene ───┤（报告 + 高度）
                                           ▼
@@ -183,7 +193,40 @@ AGENTS.md 规定的路径形状是 `scope.<组>.<方向>.<键>`（射击子应�
 
 被否决的是「省掉方向层」——那会让本应用成为唯一一个存储形状不同的子应用。
 
-### 3.10 其他被否决的做法
+### 3.10 贴图与 FBX 分体：用「URL 重写」让 loader 自己加载，而不是事后回填
+
+Blender / 3ds Max 导出的 FBX 常常把贴图写成**同目录的外部文件**（`body_diffuse.png`）而不内嵌。只丢
+`.fbx` 进来时，`FBXLoader` 会按相对路径去问**页面**要这张图（404），产物里那个材质槽就空了。用户手上
+明明有那张图，应用要做的是把两端接上。做法（`src/textures.ts`）：
+
+1. **主路线：`LoadingManager.setURLModifier`**。`FBXLoader` 会把外部引用化简成**纯文件名**再交给 three 的
+   `ImageLoader`，而 `ImageLoader` 在加载前一定会调用 `manager.resolveURL(url)`。我们在这个钩子里用
+   「用户提供的同名文件」的 `blob:` URL 回答它——于是**贴图是 three 自己按它自己的代码加载的**：
+   sRGB 颜色空间、FBX 的 wrap 模式、`flipY`、`needsUpdate` 全部由那一段代码设置，和「内嵌贴图」走的是
+   同一条路。这一点是刻意的：**贴图标记只能有一个真相来源**，事后自己给 Texture 赋一套属性迟早会漂移。
+   顺带的好处是：提供了的贴图不会产生 404，控制台也干净。
+2. **兜底路线：解析后回填**。`FBXLoader` 遇到它没有解码器的扩展名（`.tga` / `.psd` / `.dds`）时会**静默
+   造一个占位 Texture，并且根本不问 manager**（`getHandler('.tga') === null` 那条分支）。这种情况按
+   Texture 自己的名字再匹配一次：FBX 里写 `body_diffuse.tga`，你给 `body_diffuse.png`，照样补上。
+3. **匹配规则（纯函数，全部有断言）**：先按**完整文件名**（忽略目录、忽略大小写、去掉引号与空格），
+   再按**主干名**（去掉扩展名）。**刻意没有「剩下的随便配一个」这条路**——配错的贴图比空着的更糟，
+   而报告会明确写出还缺哪个名字。
+
+**⚠️ 一个真实的时序坑（这次被测试抓到）**：贴图请求是在 `loader.parse()` **内部同步发起**的，所以
+「先 parse、再装 `onLoad`、再等它完成」的写法会**错过完成事件**，症状是报告说「已补 1 张」而材质槽仍然
+是空的。现在这件事被收进一个 `TextureSession`：`onLoad` 在 parse **之前**就装好，`done()` 只负责等，
+并用「有没有请求过」区分「这个文件没有贴图」和「还在加载」。
+
+**另外一个只有写测试才会知道的三方细节**：three 的 `ImageLoader` 在自己的加载回调里用了 `this`
+（`onLoad(this)`），所以任何伪造 `<img>` 的测试替身必须像真实 DOM 那样用 `f.call(element, event)`
+派发事件——否则 `texture.image` 会被赋成 `undefined`，而且**不报任何错**。
+
+**导出侧**：`GLTFExporter` 会把 `texture.image` 重新编码成 PNG/JPEG 塞进 GLB 的 BIN chunk（同一个图像对象
+只嵌一次），所以补上的贴图和内嵌贴图在产物里没有区别——最终文件仍然自包含，`selfCheck` 之后还能被
+`GLTFLoader` 读回来。验证脚本会把产物拆开，断言 `images[0].bufferView` 存在、`uri` 不存在、材质的
+`baseColorTexture` 指向它、BIN chunk 里能找到 PNG 魔数。
+
+### 3.11 其他被否决的做法
 
 - **合并时把多个 FBX 的网格也拼进一个场景**：没有必要（角色只需要一套网格），而且会把多份骨架、
   多份材质、多份贴图都塞进产物。
@@ -191,6 +234,14 @@ AGENTS.md 规定的路径形状是 `scope.<组>.<方向>.<键>`（射击子应�
   （`normalizeModel` / `strip`），转换器再做一次会让同一件事有两处真相。
 - **加一个「编辑 clip 名」的 UI**：文件名就是命名接口（3.5），多一个 UI 就多一份需要持久化的状态。
 - **把 FBX 转换放到后端做**：见 3.1。
+- **做一个「手动给每个槽挑贴图」的界面**：真实场景里贴图文件名和 FBX 里的引用名是一致的（否则连
+  3ds Max 自己都找不到），所以名字匹配 + 缺哪个列哪个已经够用；手动分配要多一份状态和一套 UI。**但**
+  如果真遇到名字完全不同的一批文件，这就是要加的第一件事——现在的报告已经给出「哪个槽缺哪个名字」，
+  正好是那种 UI 需要的输入。
+- **按槽位类型猜贴图**（把「看起来像法线的灰度图」塞进 `normalMap`）：槽由 FBX 的材质节点决定，
+  我们只负责补上它要的那张，不负责猜用途。
+- **把 `.psd` / `.dds` 也解出来**：浏览器解不了，three 也没有解码器，硬做等于自带一个解码库。给用户的
+  答案很清楚：「另存成 png/jpg，同名即可」。
 - **「恢复默认」只清内存、不落盘**（是这一轮真被 DOM shim 测试抓到的 bug）：面板的 `flush()` 在「没有待写改动」时
   会直接返回，而「恢复默认」只改了内存里的对象、没有把 `dirty` 置起来，于是用户点完恢复默认、刷新页面，
   旧值又回来了——**看起来生效、实际没保存**。修法是 `panel.ts::resetGroup()` 里显式 `dirty = true` 再 `flush()`，
@@ -230,6 +281,8 @@ AGENTS.md 规定的路径形状是 `scope.<组>.<方向>.<键>`（射击子应�
 | --- | --- | --- | --- |
 | [Three.js](https://threejs.org) r160（`three.module.min.js` + `FBXLoader` / `GLTFExporter` / `GLTFLoader` / `OrbitControls` / `BufferGeometryUtils` / `TextureUtils` / `NURBSCurve` / `fflate`） | `apps/fbx2glb/vendor/`（1.2MB） | MIT | 原样拷贝，无 CDN 依赖；清单/版本/获取方式/md5 见 [`vendor/README.md`](vendor/README.md) |
 | `assets/sample.fbx` | `apps/fbx2glb/assets/` | 本仓库自有（无第三方素材） | **手写**的 ASCII FBX 7.4：2 骨骼蒙皮盒子 + 两个 take 都叫 `mixamo.com` 的动画，9KB |
+| `assets/sample-textured.fbx` | `apps/fbx2glb/assets/` | 本仓库自有（无第三方素材） | 同上，但材质引用**外部**贴图 `sample_body_diffuse.png`（贴图分体那条路的样例与测试输入） |
+| `assets/sample_body_diffuse.png` | `apps/fbx2glb/assets/` | 本仓库自有（无第三方素材） | 4×4 的 81 字节 PNG（零依赖生成），既是样例贴图，也是验证脚本证明「图片真被嵌进 GLB」的字节 |
 
 **关于 Mixamo 资产（本应用不内置任何 Mixamo 文件）**：Mixamo 的模型/动画可免费商用、无需署名，
 但其条款要求「**不能作为独立资产再分发**，必须并入更大的作品」。所以：
@@ -247,8 +300,13 @@ AGENTS.md 规定的路径形状是 `scope.<组>.<方向>.<键>`（射击子应�
   - 手机文件选择器里 `accept=".fbx"` 是否真的列出 `.fbx`（Android 的 picker 有时按 MIME 过滤；
     万一不列出，用「载入样例」可以验证除选择器之外的整条链路）；
   - 一次多选 6–10 个 Mixamo 文件的解析耗时与内存（全部在 JS 堆里：File → ArrayBuffer → 场景 → GLB）。
-- **外部贴图**：FBX 若把贴图作为**外部文件**引用（`body_diffuse.png` 之类），浏览器拿不到那些文件，
-  产物会缺贴图；FBX 自带的材质颜色会保留。内嵌贴图正常。
+- **外部贴图**：见 3.10——把图片放进「配套贴图」即可，按文件名匹配并**内嵌进 GLB**。仍有限制：
+  - 只有浏览器能解码的图片格式可用；`.tga` / `.psd` / `.dds` 需要另存成 png/jpg（同名即可）；
+  - 没提供的外部引用会在浏览器控制台留下一次 404（`FBXLoader` 的行为），页面日志里则是一条可读的
+    「贴图 X 没有提供」；
+  - 贴图列表是**本次会话的**：`File` 没有跨刷新的句柄，刷新后要重新选（和 FBX 列表同理）；
+  - 只按名字匹配，没有手动指定「某个槽用哪张图」（见 3.11）；
+  - 内嵌贴图（贴图就在 FBX 里）本来就能正常转换，不需要这一步。
 - **不做的**：不居中、不修朝向、不改骨骼名、不重定向不同骨架的动画、不做 in-place 修正、
   不剥手持武器/配件、不烘焙动画、不压缩纹理。
 - **不做 in-place 修正的后果**：Mixamo 下载时若不勾 `In Place`，走跑动作自带根位移，
@@ -269,8 +327,11 @@ AGENTS.md 规定的路径形状是 `scope.<组>.<方向>.<键>`（射击子应�
   的 schema 断言。四步缺一不可（AGENTS.md「设置与用户数据」第 4 条）。
 - **加一个命名/合并规则**：改 `names.ts` / `rig.ts` / `merge.ts`（都是纯逻辑），
   在验证脚本对应小节补断言——那里的断言数是本应用的回归门。
-- **换/加样例**：替换 `assets/sample.fbx`（保持 ASCII、保持小），并同步验证脚本第 6 节的
-  实测数字（骨骼数、动作数、高度、take 名）。
+- **换/加样例**：替换 `assets/sample.fbx`（保持 ASCII、保持小），并同步验证脚本第 6 节的实测数字
+  （骨骼数、动作数、高度、take 名）。`assets/sample-textured.fbx` 是它的「外部贴图」变体，两者只有
+  材质那几行不同——改一个就要看住另一个，并同步第 12 节的断言（引用名、缺几张、sRGB/wrap/flipY）。
+- **改贴图匹配规则**：`src/textures.ts` 的 `nameKey` / `stemKey` / `matchTexture` 都是纯函数，
+  改完在验证脚本第 12.1 节补断言；`URL 重写` 与 `占位槽回填` 两条路线的新行为放 12.2/12.3。
 - **升级 three**：整个 `vendor/` 一起换（含 addons），更新 `vendor/README.md` 的版本与 md5，
   同步 `apps/shooter/vendor/` 的版本断言，然后**跑全套**（平台层/vendor 变更 + 断言数变化）。
 
@@ -282,7 +343,7 @@ AGENTS.md 规定的路径形状是 `scope.<组>.<方向>.<键>`（射击子应�
 
 | 改动 | 跑什么 |
 | --- | --- |
-| 本应用的任何逻辑 / DOM / 设置 / 样例 | `node scripts/verify-fbx2glb.mjs`（**258 项断言**，1 个脚本） |
+| 本应用的任何逻辑 / DOM / 设置 / 样例 | `node scripts/verify-fbx2glb.mjs`（**320 项断言**，1 个脚本） |
 | `shared/src/settings.ts`、`server/`、`shell/`、`scripts/`、vendor | **全套**（21 个脚本；`verify-spawn-cost.mjs` 需要 `--expose-gc`） |
 
 另外每次都做：`curl` 具体 URL、写明真机确认项（AGENTS.md 启动与验证 第 3、5 条）。
@@ -312,8 +373,17 @@ curl -s http://localhost:3000/api/settings/fbx2glb
 6. **规则就是文档里写的规则**：占位名表、去重（含 `hero`/`hero-2`…）、CJK 文件名、
    单位阈值两侧、骨架匹配的歧义拒绝、设置 schema（默认值/稀疏覆盖/脏数据/两组重置/速度钳制）；
 7. **不上传**：源码级断言「没有 `localStorage`」「没有 `XMLHttpRequest`/`FormData`」
-   「整个应用只有一处 `fetch`，且只取 `./assets/sample.fbx`」；`JS` 里取的每个 DOM id 都必须在
+   「每一处 `fetch` 都只取 `./assets/` 下的内置样例资源」；`JS` 里取的每个 DOM id 都必须在
    `index.html` 里存在；引用的每个 vendor addon 都必须在 dist 里；两份 vendor three 的 md5 相同。
+8. **贴图分体这条路也是端到端验证的**（脚本第 12 节）：名字匹配规则（路径/大小写/引号/主干名/重名/
+   空引用）、URL 重写（内嵌 `data:` 与已解析的 `blob:` 必须原样通过、没配上的原样返回并记进报告）、
+   占位槽回填（`.tga` 引用 + `.png` 文件按主干名补上、没有对应文件时不乱配）、真样例解析两遍
+   （不带贴图 → 报告「缺 1」；带贴图 → loader 自己加载，sRGB/wrap/flipY 与内嵌路径一致）、导出产物的
+   内部断言（`images[0].bufferView` + 无 `uri` + `baseColorTexture` 指向它 + BIN 里有 PNG 魔数）；
+   UI 层也走过一遍（「载入样例（外部贴图）」→ 贴图行标记「已用于贴图」→ 日志写出「谁补了谁」→
+   混着拖 FBX 与图片时按扩展名分流）。
+9. **构建新鲜度**：脚本第 0 节断言 `dist/apps/fbx2glb` 比源码新——本脚本读 `dist/`，陈旧的构建只会测到
+   上一个版本（这次真踩过一次：改完 `main.ts` 没等 watcher 构建完就重跑，得到一次假失败）。
 
 8. **页面真的能跑**：`scripts/verify-fbx2glb.mjs` 最后一节用 DOM shim 启动**真实的 `dist/apps/fbx2glb/main.js`**
    （元素 id 与标签直接从 `index.html` 解析，控件消失就会红），然后走一遍用户流程：载入样例 → 报告两骨骼两动作 →

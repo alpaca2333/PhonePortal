@@ -75,6 +75,9 @@ html, body {
   cursor: pointer;
 }
 .dropzone.over { border-color: var(--accent); background: #22303c; }
+/* the texture picker is a secondary input: same affordance, less shouting */
+.dropzone.small { padding: 12px; }
+.dropzone.small .dz-title { font-size: 14px; }
 .dz-icon { font-size: 26px; }
 .dz-title { font-weight: 600; }
 .dz-hint { color: var(--fg-dim); font-size: 12px; }

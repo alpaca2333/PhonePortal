@@ -10,6 +10,11 @@
  * textures, and GLTFExporter needs a canvas to re-encode images.
  */
 import type { LoadedFbx } from './merge.js';
+import {
+  applyTextureFallback, buildTextureIndex, createTextureSession, emptyTextureReport,
+  finishTextureReport,
+  type TextureIndex, type TextureReport,
+} from './textures.js';
 
 export interface ExportOptions {
   format: 'glb' | 'gltf';
@@ -24,6 +29,22 @@ export interface ExportResult {
   bytes: number;
   /** `model/gltf-binary` or `model/gltf+json`. */
   mime: string;
+}
+
+/** A parsed FBX plus everything we learned about its textures. */
+export interface ParsedFbx extends LoadedFbx {
+  textures: TextureReport;
+  /** Present only when texture files were supplied; owns the blob: URLs (`dispose()` to revoke). */
+  textureIndex: TextureIndex | null;
+}
+
+export interface ParseOptions {
+  /** Image files the user supplied next to the FBX (matched by file name). */
+  textures?: readonly { name: string; blob: Blob }[];
+  /** How to turn a Blob into an image; overridable so the whole path runs headless in Node. */
+  loadImage?: (blob: Blob) => Promise<any>;
+  /** How long to wait for the loader's texture requests before giving up (see textures.ts). */
+  textureTimeoutMs?: number;
 }
 
 export interface SelfCheck {
@@ -131,23 +152,60 @@ export function scaleGlb(buffer: ArrayBuffer, scale: number): ArrayBuffer {
   return writeGlb(json, bin);
 }
 
-/** Parse one FBX buffer into a scene + clips. Rejects with the loader's own message. */
-export async function parseFbx(buffer: ArrayBuffer, file: string): Promise<LoadedFbx> {
+/**
+ * Turn a Blob into something three can use as a texture image. A plain `HTMLImageElement` on purpose
+ * (not `createImageBitmap`): it is what three's own `ImageLoader` produces, so the fallback route and
+ * the loader route end up with the same kind of object — including `flipY`, which an ImageBitmap
+ * cannot honour.
+ */
+export async function imageFromBlob(blob: Blob): Promise<any> {
+  if (typeof Image === 'undefined' || typeof document === 'undefined') {
+    throw new Error('这个环境没有 Image/HTMLImageElement，无法解码贴图');
+  }
+  const url = URL.createObjectURL(blob);
+  try {
+    return await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('贴图解码失败'));
+      img.src = url;
+    });
+  } finally {
+    // The decoded image stays valid after the URL is revoked; uploading it does not re-fetch.
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  }
+}
+
+/**
+ * Parse one FBX buffer into a scene + clips, and resolve its textures.
+ *
+ * `path` is left empty: an EXTERNAL texture reference has no directory to resolve against, which is
+ * what the texture index is for (textures.ts). A `LoadingManager` therefore always goes in, even with
+ * no files supplied, because the set of names the loader asks for IS the report the user needs
+ * (「缺 sample_body_diffuse.png」).
+ */
+export async function parseFbx(buffer: ArrayBuffer, file: string, opts: ParseOptions = {}): Promise<ParsedFbx> {
   // @ts-ignore - vendored three addon, untyped (same escape hatch as apps/shooter/src/assets.ts)
   const { FBXLoader } = await import('../vendor/addons/loaders/FBXLoader.js');
-  const loader = new FBXLoader();
-  // `path` is empty: any texture the FBX references as an EXTERNAL file cannot be resolved from a
-  // dropped file (there is no directory to resolve against), which the report calls out. Embedded
-  // textures work fine.
+  const index = opts.textures && opts.textures.length > 0 ? buildTextureIndex(opts.textures) : null;
+  const report = emptyTextureReport();
+  // The session (and therefore its `onLoad` hook) exists BEFORE the parse: the loader starts its
+  // texture requests synchronously inside `parse()`.
+  const session = createTextureSession(index ?? buildTextureIndex([]), report);
+  const loader = new FBXLoader(session.manager);
   const root = loader.parse(buffer, '');
   const clips = Array.isArray(root?.animations) ? root.animations : [];
-  return { file, root, clips };
+  const settle = await session.done(opts.textureTimeoutMs);
+  report.timedOut = settle.timedOut;
+  if (index) await applyTextureFallback(root, index, report, opts.loadImage ?? imageFromBlob);
+  finishTextureReport(root, index ?? buildTextureIndex([]), report);
+  return { file, root, clips, textures: report, textureIndex: index };
 }
 
 /** Read a picked/dropped File and parse it. */
-export async function loadFbxFile(file: File): Promise<LoadedFbx> {
+export async function loadFbxFile(file: File, opts: ParseOptions = {}): Promise<ParsedFbx> {
   const buffer = await file.arrayBuffer();
-  return parseFbx(buffer, file.name);
+  return parseFbx(buffer, file.name, opts);
 }
 
 /** Export a scene to a Blob. The scale is applied to the FINISHED file (see wrapSceneRoot). */
