@@ -177,6 +177,22 @@ export async function imageFromBlob(blob: Blob): Promise<any> {
 }
 
 /**
+ * 输入格式探测。目的很具体：只丢一个"其实不是 FBX"的文件进来时，`FBXLoader` 只会说
+ * 「Cannot find the version number for the file given.」——那句话对用户毫无信息量。
+ * 探测本身是纯字节/字符串判断，可以断言。
+ */
+export function sniffFormat(buffer: ArrayBuffer): 'glb' | 'gltf' | 'fbx-binary' | 'fbx-ascii' | 'unknown' {
+  const bytes = new Uint8Array(buffer);
+  if (new TextDecoder().decode(bytes.subarray(0, 4)) === 'glTF') return 'glb';
+  const head = new TextDecoder().decode(bytes.subarray(0, Math.min(bytes.length, 64)));
+  if (head.startsWith('Kaydara FBX Binary')) return 'fbx-binary';
+  const text = new TextDecoder().decode(bytes.subarray(0, Math.min(bytes.length, 4096)));
+  if (/^\s*\{/.test(text) && text.includes('"asset"')) return 'gltf';
+  if (text.includes('FBXHeaderExtension') || text.startsWith('; FBX')) return 'fbx-ascii';
+  return 'unknown';
+}
+
+/**
  * Parse one FBX buffer into a scene + clips, and resolve its textures.
  *
  * `path` is left empty: an EXTERNAL texture reference has no directory to resolve against, which is
@@ -185,6 +201,13 @@ export async function imageFromBlob(blob: Blob): Promise<any> {
  * (「缺 sample_body_diffuse.png」).
  */
 export async function parseFbx(buffer: ArrayBuffer, file: string, opts: ParseOptions = {}): Promise<ParsedFbx> {
+  const format = sniffFormat(buffer);
+  if (format === 'glb' || format === 'gltf') {
+    throw new Error(file + ' 是 glTF/GLB 文件，不是 FBX —— 本应用目前只接受 FBX（.glb 输入还没做）');
+  }
+  if (format === 'unknown') {
+    throw new Error(file + ' 既不是 FBX 也不是 glTF（无法识别的格式）');
+  }
   // @ts-ignore - vendored three addon, untyped (same escape hatch as apps/shooter/src/assets.ts)
   const { FBXLoader } = await import('../vendor/addons/loaders/FBXLoader.js');
   const index = opts.textures && opts.textures.length > 0 ? buildTextureIndex(opts.textures) : null;

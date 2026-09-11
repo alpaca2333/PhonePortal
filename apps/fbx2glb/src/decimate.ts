@@ -58,7 +58,8 @@ export type SkipReason =
   | 'at-target'  // 目标 ≥ 原面数，没什么可减
   | 'no-index'   // 没有 position 属性
   | 'morph'      // 有 morph target，减面会毁掉形变
-  | 'failed';    // simplifier 自己报错
+  | 'failed'     // simplifier 自己报错
+  | 'grew';      // 减面结果反而更多（不允许）——保留原几何体
 
 export interface MeshDecimation {
   name: string;
@@ -162,9 +163,25 @@ interface SimplifyResult {
   vertsBefore: number;
   vertsAfter: number;
   error: number;
+  /** 结果比输入还多 → 已放弃，`geometry` 就是传入的那个对象。 */
+  grew: boolean;
 }
 
-/** 简化几何体（不做 I/O、不改原对象；返回一个新的 BufferGeometry）。 */
+/**
+ * 简化几何体（不做 I/O、不改原对象；返回一个新的 BufferGeometry）。
+ *
+ * 两条路，取决于网格有没有**多材质分组**：
+ *
+ *   * 单材质：整条索引交给 simplifier 一次。
+ *   * 多材质：**整条索引也交给它一次**，事后再按"每个顶点属于哪个材质"把输出三角形重新分桶成组。
+ *     ⚠️ 这里曾经是"每个分组各简化一次"，两个后果都被真机验证过：
+ *     ① 传错了参数（传整条索引而不是分组那段）会让 264 个分组的模型把整份网格简化 264 次再拼起来
+ *        —— 实测 46297 → 12222408 面；
+ *     ② 就算参数传对，分组各减也是错的方向：材质缝对 `LockBorder` 来说是"边界边"，而一个小组的边几乎
+ *        全是这种缝，于是每组的可折叠量接近 0（264 组的模型减不动）。
+ *     材质缝不是**几何**边界（表面在那里是连续的，两侧共用顶点），所以正确的做法是把它当内部边一起简化；
+ *     贴图/UV 缝合线由 `simplifyWithAttributes` 的属性权重保护，材质归属事后按顶点重算。
+ */
 export function simplifyGeometry(
   geometry: any,
   simplifier: any,
@@ -201,33 +218,55 @@ export function simplifyGeometry(
     }
   }
 
+  const materialGroups: { start: number; count: number; materialIndex: number }[] =
+    Array.isArray(geometry.groups) && geometry.groups.length > 0
+      ? geometry.groups.map((g: any) => ({
+        start: g.start ?? 0, count: g.count ?? 0, materialIndex: g.materialIndex ?? 0,
+      }))
+      : [];
+  const multiMaterial = materialGroups.length > 1;
+
   const flags: string[] = lockBorder ? ['LockBorder'] : [];
-  // 多材质网格：按分组各自的索引区间分别简化，材质边界因此变成硬边（不会把两种材质的三角形折叠到
-  // 一起）。单材质（0/1 组）直接整条索引跑一次。
-  const groups = Array.isArray(geometry.groups) && geometry.groups.length > 1
-    ? geometry.groups
-    : [{ start: 0, count: index.length, materialIndex: 0 }];
-  const outParts: Uint32Array[] = [];
-  let error0 = 0;
-  for (const group of groups) {
-    const slice = index.subarray(group.start, group.start + group.count);
-    const share = slice.length / index.length;
-    const groupTarget = Math.max(3, Math.round(targetTris * share)) * 3;
-    const [simplified, err] = attrs
-      ? simplifier.simplifyWithAttributes(index, positions, stride, attrs, attrStride,
-        parts.map((p) => p.weight), null, groupTarget, error, flags)
-      : simplifier.simplify(index, positions, stride, groupTarget, error, flags);
-    error0 = Math.max(error0, err);
-    outParts.push(simplified);
+  const target = Math.min(index.length, Math.max(3, Math.round(targetTris)) * 3);
+  if (target >= index.length) {
+    return {
+      geometry, before, after: before, vertsBefore, vertsAfter: vertsBefore,
+      error: 0, grew: true,
+    };
   }
-  const newIndexRaw = new Uint32Array(outParts.reduce((n, p) => n + p.length, 0));
-  let at = 0;
-  for (const part of outParts) { newIndexRaw.set(part, at); at += part.length; }
+  let simplified: Uint32Array;
+  let error0 = 0;
+  try {
+    const result = attrs
+      ? simplifier.simplifyWithAttributes(index, positions, stride, attrs, attrStride,
+        parts.map((p) => p.weight), null, target, error, flags)
+      : simplifier.simplify(index, positions, stride, target, error, flags);
+    simplified = result[0];
+    error0 = result[1];
+  } catch {
+    // simplifier 自己报错（例如极端参数触发它内部的断言）：原样返回，宁可没减。
+    return {
+      geometry, before, after: before, vertsBefore, vertsAfter: vertsBefore,
+      error: 0, grew: true,
+    };
+  }
+
+  // 不变量：减面**永远不能变多**。数量不对就整体放弃、保留原几何体（并由调用方报成 skipped），
+  // 而不是把一个更糟的结果交给用户 —— 这条以前没有，所以"−-26300%"能一路显示到界面上。
+  if (simplified.length >= index.length) {
+    return {
+      geometry, before, after: before, vertsBefore, vertsAfter: vertsBefore,
+      error: error0, grew: true,
+    };
+  }
 
   // 压紧顶点：同一张 remap 表过滤**所有**属性，任何一个属性漏掉都会让蒙皮/UV 整体错位。
   const remap = new Int32Array(vertsBefore).fill(-1);
   let vertsAfter = 0;
-  for (const i of newIndexRaw) if (remap[i] < 0) remap[i] = vertsAfter++;
+  for (const i of simplified) if (remap[i] < 0) remap[i] = vertsAfter++;
+  // 新顶点 → 旧顶点（只有多材质时要按顶点反查材质归属）
+  const inverse = new Int32Array(vertsAfter);
+  for (let i = 0; i < vertsBefore; i++) { const r = remap[i]!; if (r >= 0) inverse[r] = i; }
   const out = new THREE.BufferGeometry();
   for (const [name, attr] of Object.entries<any>(geometry.attributes)) {
     const comps = attr.itemSize;
@@ -239,21 +278,53 @@ export function simplifyGeometry(
     }
     out.setAttribute(name, new THREE.BufferAttribute(array, comps, attr.normalized));
   }
-  const newIndex = new Uint32Array(newIndexRaw.length);
-  for (let i = 0; i < newIndexRaw.length; i++) newIndex[i] = remap[newIndexRaw[i]!]!;
-  out.setIndex(new THREE.BufferAttribute(newIndex, 1));
-  // 分组按新的索引长度重排（只有单组时 groups 为空，导出时等价）。
-  if (Array.isArray(geometry.groups) && geometry.groups.length > 1) {
+  let newIndex = new Uint32Array(simplified.length);
+  for (let i = 0; i < simplified.length; i++) newIndex[i] = remap[simplified[i]!]!;
+
+  if (multiMaterial) {
+    // 每个**原始顶点**属于哪个材质（同一个顶点被多个组用到时以先出现的组为准，结果与组顺序无关）。
+    const vertexMaterial = new Int32Array(vertsBefore).fill(-1);
+    for (const g of materialGroups) {
+      const stop = Math.min(index.length, g.start + g.count);
+      for (let i = Math.max(0, g.start); i < stop; i++) {
+        const v = index[i]!;
+        if (vertexMaterial[v] === -1) vertexMaterial[v] = g.materialIndex;
+      }
+    }
+    // 输出三角形按"第一个有材质归属的顶点"分桶，再把桶拼成连续的分组：材质边界因此是**近似**保持的
+    // （可能移动一个顶点），但几何体是连续的——不会像"按材质切开分别减"那样在缝上留洞或减不动。
+    const buckets = new Map<number, number[]>();
+    const triCount = Math.floor(newIndex.length / 3);
+    for (let t = 0; t < triCount; t++) {
+      let material = -1;
+      for (let k = 0; k < 3; k++) {
+        const old = inverse[newIndex[t * 3 + k]!]!;
+        const m = vertexMaterial[old]!;
+        if (m !== -1) { material = m; break; }
+      }
+      const list = buckets.get(material);
+      if (list) list.push(t);
+      else buckets.set(material, [t]);
+    }
+    const ordered = new Uint32Array(triCount * 3);
     let cursor = 0;
-    const rebuilt = groups.map((g: any, i: number) => {
-      const count = outParts[i]!.length;
-      const group = { start: cursor, count, materialIndex: g.materialIndex ?? 0 };
-      cursor += count;
-      return group;
-    });
-    for (const g of rebuilt) out.addGroup(g.start, g.count, g.materialIndex);
+    for (const material of [...buckets.keys()].sort((a, b) => a - b)) {
+      const firstTri = cursor / 3;
+      for (const t of buckets.get(material)!) {
+        ordered[cursor++] = newIndex[t * 3]!;
+        ordered[cursor++] = newIndex[t * 3 + 1]!;
+        ordered[cursor++] = newIndex[t * 3 + 2]!;
+      }
+      out.addGroup(firstTri * 3, cursor - firstTri * 3, material < 0 ? 0 : material);
+    }
+    newIndex = ordered;
   }
-  return { geometry: out, before, after: Math.floor(newIndex.length / 3), vertsBefore, vertsAfter, error: error0 };
+
+  out.setIndex(new THREE.BufferAttribute(newIndex, 1));
+  return {
+    geometry: out, before, after: Math.floor(newIndex.length / 3),
+    vertsBefore, vertsAfter, error: error0, grew: false,
+  };
 }
 
 /**
@@ -293,6 +364,14 @@ export async function decimateForExport(
     try {
       const r = simplifyGeometry(mesh.geometry, simplifier, target, opts.error, opts.lockBorder);
       const ms = Date.now() - t;
+      if (r.grew) {
+        // 不可能发生的方向（减面变多）——保留原几何体并如实上报，绝不把更糟的结果交出去。
+        report.meshes.push({
+          name: String(mesh.name || 'mesh'), before, after: before,
+          vertsBefore: r.vertsBefore, vertsAfter: r.vertsAfter, ms, error: r.error, skip: 'grew',
+        });
+        continue;
+      }
       mesh.geometry = r.geometry;
       report.meshes.push({
         name: String(mesh.name || 'mesh'), before: r.before, after: r.after,
@@ -317,9 +396,9 @@ export async function decimateForExport(
     report.ms += m.ms;
   }
   if (report.applied === 0) {
-    // 全都是 tiny/at-target：不是错误，但要告诉用户为什么没变。
-    report.reason = report.meshes.every((m) => m.skip === 'tiny') && report.meshes.length > 0
-      ? 'tiny' : report.reason ?? 'at-target';
+    // 全都是 tiny/at-target/grew：不是错误，但要告诉用户为什么没变。
+    const all = (kind: SkipReason): boolean => report.meshes.length > 0 && report.meshes.every((m) => m.skip === kind);
+    report.reason = all('tiny') ? 'tiny' : all('grew') ? 'grew' : report.reason ?? 'at-target';
   }
   return { root: cloned, report };
 }
@@ -332,11 +411,16 @@ export function decimateSummaryText(report: DecimateReport): string {
       case 'unavailable': return '减面不可用（这个浏览器没有 WebAssembly）';
       case 'tiny': return '没有网格需要减面（都小于 ' + DECIMATE_MIN_TRIS + ' 面）';
       case 'at-target': return '没有网格需要减面（目标不低于原面数）';
+      case 'grew': return '减面没有收益（结果不比原来少），全部保持原样';
       default: return '没有网格被减面';
     }
   }
+  // 负数在这里是不可表示的（减面变多已经被 simplifyGeometry 挡住）——写 Math.max 只是让"不可能发生"
+  // 的事故在界面上显示成 0% 而不是 "−-26300%" 这种把用户看笑的数字。
   const cut = report.trisBefore > 0
-    ? Math.round((1 - report.trisAfter / report.trisBefore) * 100) : 0;
+    ? Math.max(0, Math.round((1 - report.trisAfter / report.trisBefore) * 100)) : 0;
+  const kept = report.meshes.filter((m) => m.skip === 'grew' || m.skip === 'failed').length;
   return `减面：${report.trisBefore} → ${report.trisAfter} 面（−${cut}%）、` +
-    `顶点 ${report.vertsBefore} → ${report.vertsAfter}、${report.ms} ms`;
+    `顶点 ${report.vertsBefore} → ${report.vertsAfter}、${report.ms} ms` +
+    (kept > 0 ? `（${kept} 个网格保持原样）` : '');
 }

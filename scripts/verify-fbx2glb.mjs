@@ -1324,6 +1324,86 @@ section('13. 自动减面');
   const thinTris = thinJson.accessors[prim.indices].count / 3;
   check(thinTris < trisBefore, 'glTF 里的三角面数确实变少了', Math.round(thinTris) + ' < ' + trisBefore);
 
+  // ---- 13.4 多材质分组：整份网格简化一次 + 按顶点重算材质归属 ----
+  // 真机回归门：用户那个 264 个分组的模型原来报「46297 → 12222408 面（−-26300%）」。两个原因都在这里钉住：
+  // ① 每个分组曾经把**整条索引**交给 simplifier（于是每份都是整网格的副本，拼起来 ×264）；
+  // ② 就算参数传对，"按材质切开各自减"也不可行——材质缝对 LockBorder 来说是边界边，小组几乎减不动。
+  // 现在整份网格只简化一次（材质缝是内部边），材质归属事后按顶点重算并重新分桶成分组。
+  const buildGrouped = (groupCount) => {
+    const geo = new THREE.SphereGeometry(1, 60, 40);           // 4720 面
+    geo.clearGroups();
+    const total = geo.index.count;
+    if (groupCount > 1) {
+      const per = Math.floor(total / groupCount / 3) * 3;
+      for (let g = 0; g < groupCount; g++) {
+        const start = g * per;
+        const count = g === groupCount - 1 ? total - start : per;
+        geo.addGroup(start, count, g % 3);
+      }
+    }
+    const n = geo.getAttribute('position').count;
+    geo.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(new Uint16Array(n * 4), 4));
+    geo.setAttribute('skinWeight', new THREE.Float32BufferAttribute(new Float32Array(n * 4).fill(0.5), 4));
+    const mesh = new THREE.SkinnedMesh(geo, new THREE.MeshStandardMaterial());
+    mesh.name = 'G';
+    const bone = new THREE.Bone(); bone.name = 'Hips';
+    mesh.add(bone); mesh.bind(new THREE.Skeleton([bone]));
+    const rig = new THREE.Group(); rig.add(mesh);
+    return { rig, mesh, tris: decimate.triangleCount(geo) };
+  };
+  for (const groupCount of [1, 3, 8, 264]) {
+    const { rig, tris } = buildGrouped(groupCount);
+    const { root: thinnedRig, report: gr } = await decimate.decimateForExport(rig, {
+      enabled: true, ratio: 0.5, error: 0.01, lockBorder: true,
+    });
+    const gmesh = thinnedRig.getObjectByName('G');
+    const gindex = gmesh.geometry.index;
+    const inBand = gr.trisAfter > tris * 0.3 && gr.trisAfter < tris * 0.75;
+    check(gr.applied === 1 && inBand, `${groupCount} 个分组：减到 ${tris} → ${gr.trisAfter} 面（目标 50%）`);
+    check(gr.trisAfter < gr.trisBefore, `${groupCount} 个分组：面数只减不增（真机 bug 是 ×264）`);
+    const groups = gmesh.geometry.groups ?? [];
+    if (groupCount > 1) {
+      const sum = groups.reduce((n, g) => n + g.count, 0);
+      check(sum === gindex.count, `${groupCount} 个分组：分组长度之和 = 索引长度（无重叠、无空洞）`,
+        `${sum} vs ${gindex.count}`);
+      check(groups.length > 0 && groups.every((g) => g.count > 0 && g.count % 3 === 0),
+        `${groupCount} 个分组：每个分组都非空且是整三角形`, JSON.stringify(groups.slice(0, 3)));
+      check(groups.every((g) => [0, 1, 2].includes(g.materialIndex)),
+        `${groupCount} 个分组：材质号仍取自原集合`, JSON.stringify([...new Set(groups.map((g) => g.materialIndex))]));
+      const maxG = Math.max(...gindex.array);
+      check(maxG < gmesh.geometry.getAttribute('position').count, `${groupCount} 个分组：索引不越界`);
+    } else {
+      check(groups.length <= 1, '单材质网格不写多余的分组');
+    }
+  }
+
+  // ---- 13.5 「减面不能变多」这条不变量本身（假 simplifier 直接触发） ----
+  const guardGeo = buildGrouped(4).mesh.geometry;
+  const growStub = {
+    simplify: (idx) => [new Uint32Array(idx.length * 3), 0],
+    simplifyWithAttributes: (idx) => [new Uint32Array(idx.length * 3), 0],
+  };
+  const grew = decimate.simplifyGeometry(guardGeo, growStub, 100, 0.01, true);
+  check(grew.grew === true && grew.geometry === guardGeo && grew.after === grew.before,
+    'simplifier 返回更多索引时：整体放弃、原样返回原几何体', JSON.stringify({ grew: grew.grew, after: grew.after }));
+  const throwStub = {
+    simplify: () => { throw new Error('assert'); },
+    simplifyWithAttributes: () => { throw new Error('assert'); },
+  };
+  const failed = decimate.simplifyGeometry(guardGeo, throwStub, 100, 0.01, true);
+  check(failed.grew === true && failed.geometry === guardGeo, 'simplifier 抛错时也不崩、不变形');
+  const grewReport = {
+    available: true, applied: 0, trisBefore: 1000, trisAfter: 1000, vertsBefore: 100, vertsAfter: 100,
+    ms: 0, reason: 'grew',
+    meshes: [{ name: 'x', before: 1000, after: 1000, vertsBefore: 100, vertsAfter: 100, ms: 0, error: 0, skip: 'grew' }],
+  };
+  check(!decimate.decimateSummaryText(grewReport).includes('-'),
+    '「减面变多」的报告里不会再出现负数百分比', decimate.decimateSummaryText(grewReport));
+  check(decimate.decimateSummaryText(grewReport).includes('保持原样'), '并且说明了是保持原样',
+    decimate.decimateSummaryText(grewReport));
+  const served = decimate.simplifyGeometry(guardGeo, growStub, 100, 0.01, true);
+  check(served.before === served.after, '被放弃时 before/after 一致（报告不会出现 −0% 之类）');
+
   // ---- 13.4 关闭 / 降级路径 ----
   const offRes = await decimate.decimateForExport(rig, { enabled: false, ratio: 0.5, error: 0.01, lockBorder: true });
   check(offRes.root === rig && offRes.report.applied === 0 && offRes.report.reason === 'disabled',
@@ -1335,7 +1415,22 @@ section('13. 自动减面');
   check(decimate.decimateSummaryText(tinyRes.report).includes('小于'), '摘要解释了为什么没减',
     decimate.decimateSummaryText(tinyRes.report));
 
-  // ---- 13.5 设置 schema ----
+  // ---- 13.7 输入格式探测：不是 FBX 时要给一句能读的话 ----
+  check(convert.sniffFormat(sampleBuffer.slice(0)) === 'fbx-ascii', '样例被识别为 ASCII FBX');
+  const glbHeader = new Uint8Array(20);
+  glbHeader.set(new TextEncoder().encode('glTF'), 0);
+  check(convert.sniffFormat(glbHeader.buffer) === 'glb', 'glTF 魔数被识别');
+  const gltfText = new TextEncoder().encode('  { "asset": { "version": "2.0" } }').buffer;
+  check(convert.sniffFormat(gltfText) === 'gltf', 'JSON 的 .gltf 被识别');
+  const junk = new TextEncoder().encode('hello world').buffer;
+  check(convert.sniffFormat(junk) === 'unknown', '其它内容归为 unknown');
+  const glbError = await convert.parseFbx(glbHeader.buffer.slice(0), 'x.glb').then(() => null, (e) => e);
+  check(!!glbError && /glTF\/GLB/.test(glbError.message), '把 .glb 丢进来时给出可读的报错（而不是 FBXLoader 的原文）',
+    glbError && glbError.message);
+  const junkError = await convert.parseFbx(junk, 'x.bin').then(() => null, (e) => e);
+  check(!!junkError && /无法识别/.test(junkError.message), '陌生格式也有可读的报错', junkError && junkError.message);
+
+  // ---- 13.6 设置 schema ----
   check(JSON.stringify(settings.decimateDefaults()) ===
     JSON.stringify({ enabled: false, ratio: 0.5, error: 0.01, lockBorder: true }),
     '减面默认关闭（有损操作不该默认改别人的模型）', JSON.stringify(settings.decimateDefaults()));
