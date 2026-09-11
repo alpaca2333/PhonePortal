@@ -268,14 +268,24 @@ const serverLog = [];
 try {
   port = await freePort();
   const base = 'http://127.0.0.1:' + port;
-  child = spawn(process.execPath, [path.join(ROOT, 'dist/server/src/index.js')], {
-    cwd: ROOT,
-    env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', PORTAL_DATA_DIR: dataDir, PORTAL_MAX_ASSET_MB: '1' },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  child.stdout.on('data', (b) => serverLog.push(String(b)));
-  child.stderr.on('data', (b) => serverLog.push(String(b)));
-  const up = await serverUp(base);
+  // Two attempts: `npm run dev` swaps dist/ atomically, so a spawn inside that window sees a missing
+  // `dist/server/src/index.js` and dies immediately — a false red (seen once in verify-fbx2glb §15).
+  let up = false;
+  for (let attempt = 1; attempt <= 2 && !up; attempt++) {
+    child = spawn(process.execPath, [path.join(ROOT, 'dist/server/src/index.js')], {
+      cwd: ROOT,
+      env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', PORTAL_DATA_DIR: dataDir, PORTAL_MAX_ASSET_MB: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child.stdout.on('data', (b) => serverLog.push(String(b)));
+    child.stderr.on('data', (b) => serverLog.push(String(b)));
+    up = await serverUp(base);
+    if (!up) {
+      try { child.kill('SIGKILL'); } catch { /* already gone */ }
+      child = null;
+      await new Promise((r) => setTimeout(r, 800));
+    }
+  }
   check(up, '临时服务器起来了（PORT=' + port + '，PORTAL_DATA_DIR=' + path.relative(ROOT, dataDir) + '）',
     up ? '' : serverLog.join(''));
   if (!up) throw new Error('server did not start');

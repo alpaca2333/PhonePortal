@@ -1860,17 +1860,31 @@ section('15. HTTP API：FBX 进，GLB 出');
   });
   const base = 'http://127.0.0.1:' + port;
   const serverLog = [];
-  const child = spawn(process.execPath, [new URL('../dist/server/src/index.js', import.meta.url).pathname], {
-    cwd: new URL('..', import.meta.url).pathname,
-    env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', PORTAL_DATA_DIR: tmpRoot, PORTAL_MAX_FBX_MB: '1' },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  child.stdout.on('data', (b) => serverLog.push(String(b)));
-  child.stderr.on('data', (b) => serverLog.push(String(b)));
+  let child = null;
+  // Two attempts on purpose: `npm run dev` swaps dist/ atomically (rm dist + rename), so a spawn that
+  // lands inside that window sees a missing `dist/server/src/index.js` and dies instantly. That is a
+  // false red (observed once while developing this section), so retry once before failing.
+  const startServer = async () => {
+    const c = spawn(process.execPath, [new URL('../dist/server/src/index.js', import.meta.url).pathname], {
+      cwd: new URL('..', import.meta.url).pathname,
+      env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', PORTAL_DATA_DIR: tmpRoot, PORTAL_MAX_FBX_MB: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    c.stdout.on('data', (b) => serverLog.push(String(b)));
+    c.stderr.on('data', (b) => serverLog.push(String(b)));
+    for (let i = 0; i < 60; i++) {
+      try { if ((await fetch(base + '/api/portal')).ok) return c; } catch { /* not listening yet */ }
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    try { c.kill('SIGKILL'); } catch { /* already gone */ }
+    return null;
+  };
   try {
     let up = false;
-    for (let i = 0; i < 100 && !up; i++) {
-      try { up = (await fetch(base + '/api/portal')).ok; } catch { await new Promise((r) => setTimeout(r, 150)); }
+    for (let attempt = 1; attempt <= 2 && !up; attempt++) {
+      child = await startServer();
+      up = child !== null;
+      if (!up) await new Promise((r) => setTimeout(r, 800));
     }
     check(up, '临时服务器起来了（PORT=' + port + '，PORTAL_DATA_DIR 指向临时目录）', up ? '' : serverLog.join(''));
     check(!fsMod.existsSync(tmpRoot + '/tmp/stale-from-a-crashed-conversion.fbx'),
