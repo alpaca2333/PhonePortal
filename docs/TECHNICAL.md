@@ -71,7 +71,7 @@
     │  ├─ verify-characters.mjs   # 射击子应用**角色模型**（按 `characters.ts` 清单，逐角色）：自包含无外链 + 每个 skin 共用同一组骨骼 + 静止朝向 +Z（人形看脚尖/脚踝，机器人看眼睛/身体）+ 映射的 clip 全在 + 瞄准片段覆盖 ≥10/13 上半身骨骼 + `strip` 网格确实被剥掉（含「不剥身体就会偏 0.66」的反向断言）+ 归一化 2.0 高/身体居中 + **「头骨在身高里的位置」> 72%**（Q 版回归门）
     │  ├─ verify-character-render.mjs # 射击子应用**着色器空间**的角色验证：按 GLTFLoader 的方式重建场景（网格节点即 SkinnedMesh、单位阵绑定）后走真实 `spawnFromTemplate`，用 `applyBoneTransform × matrixWorld` 量「画出来多大」「有没有巨大网格」「**描边外壳的世界厚度 ≈ OUTLINE_WIDTH**」——真机「每个人都是巨大黑球」的回归门（Box3 类断言看不见着色器里的偏移）
     │  ├─ preview-model.mjs      # **离线模型预览**（本环境无浏览器）：把任意 .glb/.gltf 的四个正交视图光栅化成一张 PNG（零依赖自写 PNG + 平面着色，绑定姿势、不做蒙皮），用来在换模型前真的看一眼形状/朝向/手持物
-    │  ├─ verify-fbx2glb.mjs    # FBX→GLB 子应用（apps/fbx2glb）：**用真样例跑真管线**——vendored FBXLoader 解析（蒙皮/骨骼/两个 take）→ 合并（挑本体/骨架漂移重定向/覆盖率门跳过）→ GLTFExporter 写出 GLB → 容器断言（magic/长度/对齐/单一 buffer/无 uri/通道指向关节）→ **GLTFLoader 读回自检** → 缩放只发生一次（含 `readGlb`/`writeGlb` 往返与「缩放不改 BIN」）→ 命名/单位/骨架匹配/设置 schema 的纯规则 → **「不上传」源码级断言**（无 localStorage/XHR/FormData、唯一 fetch 只取内置样例）→ **DOM shim 启动真实 main.js 走一遍用户流程**（样例→转换→下载不联网→改设置只发一次 PUT→多文件/合并两种模式→恢复默认真的落盘→混拖 FBX+图片按扩展名分流）→ **外部贴图（贴图与 FBX 分体）**：名字匹配/主干名匹配、`setURLModifier` 把引用换成 blob: URL 交给 loader 自己加载、占位槽按名回填、`sample-textured.fbx` 不带与带贴图各解析一遍、产物里 `images[0].bufferView` + 无 `uri` + `baseColorTexture` + BIN 里的 PNG 魔数 → **自动减面**：纯规则（目标面数/跳过规则）+ 合成 6016 面蒙皮球真减到 3008 面（−50%）+「所有属性按同一张 remap 表压紧 / 索引不越界 / **每个顶点蒙皮权重和仍为 1** / 原模型一点没变」+ 减面后 GLB 更小且能被 GLTFLoader 读回（JOINTS/WEIGHTS/TEXCOORD 都在）+ **多材质分组 1/3/8/264 组的回归门（减到目标、只减不增、分组之和 = 索引长度）** + 两条护栏（simplifier 返回更多/抛错都保留原几何体）+ 输入格式探测（另加「dist 比源码新」的新鲜度断言）
+    │  ├─ verify-fbx2glb.mjs    # FBX→GLB 子应用（apps/fbx2glb）：**用真样例跑真管线**——vendored FBXLoader 解析（蒙皮/骨骼/两个 take）→ 合并（挑本体/骨架漂移重定向/覆盖率门跳过）→ GLTFExporter 写出 GLB → 容器断言（magic/长度/对齐/单一 buffer/无 uri/通道指向关节）→ **GLTFLoader 读回自检** → 缩放只发生一次（含 `readGlb`/`writeGlb` 往返与「缩放不改 BIN」）→ 命名/单位/骨架匹配/设置 schema 的纯规则 → **「不上传」源码级断言**（无 localStorage/XHR/FormData、唯一 fetch 只取内置样例）→ **DOM shim 启动真实 main.js 走一遍用户流程**（样例→转换→下载不联网→改设置只发一次 PUT→多文件/合并两种模式→恢复默认真的落盘→混拖 FBX+图片按扩展名分流）→ **外部贴图（贴图与 FBX 分体）**：名字匹配/主干名匹配、`setURLModifier` 把引用换成 blob: URL 交给 loader 自己加载、占位槽按名回填、`sample-textured.fbx` 不带与带贴图各解析一遍、产物里 `images[0].bufferView` + 无 `uri` + `baseColorTexture` + BIN 里的 PNG 魔数 → **自动减面**：纯规则（目标面数/跳过规则）+ 合成 6016 面蒙皮球真减到 3008 面（−50%）+「所有属性按同一张 remap 表压紧 / 索引不越界 / **每个顶点蒙皮权重和仍为 1** / 原模型一点没变」+ 减面后 GLB 更小且能被 GLTFLoader 读回（JOINTS/WEIGHTS/TEXCOORD 都在）+ **多材质分组 1/3/8/264 组的回归门（减到目标、只减不增、分组之和 = 索引长度）** + 两条护栏（simplifier 返回更多/抛错都保留原几何体）+ 输入格式探测 + **压缩贴图**（等比尺寸规则、按槽位选编码、共享图片只压一次、超大 canvas 跳过、GLB 里只有 2 张图且 mimeType 正确）（另加「dist 比源码新」的新鲜度断言）
     │  ├─ verify-diag.mjs        # 射击子应用**卡顿归因**（`?diag=1`）：`diagcore.ts` 的七条规则与正反用例（编译同时掉堆必须报编译 / 长帧但 JS 便宜不许算到 sim / 无 `performance.memory` 就不给 GC 归因）+ 有界日志与分位 + 用 DOM shim 和假时钟/假堆驱动真实 `diag.ts` 的帧记账、读数、点按面板、`report()`/`json()`、**分辨率链（`postfx.ts::resolutionChain/resolutionText`：两个方向的 texel 数相同、相机高度差出 13.8 vs 18.7 px/世界单位、`像素化 = 0` 时改吃画布与 DPR、脏数据不印 NaN，以及 badge 第二行 / 面板两行 / `json().resolution` 的接线与「provider 抛错静默留空」）**
     │  └─ trace-shooter.mjs      # 子应用回归工具：固定 PRNG 跑脚本化场景，逐帧打印射击模拟状态（重构前后 diff 必须为空）
     ├─ server/                   # 后端（Node + TS，编译到 dist/server/src/*.js）
@@ -92,7 +92,7 @@
        ├─ clock/                 # ⏰ 时钟 + 秒表
        ├─ calculator/            # 🧮 计算器（内置表达式解析，无 eval）
        ├─ blackhole/             # 🕳️ 黑洞（WebGL2 Schwarzschild 光线追踪 + 吸积盘）
-       ├─ fbx2glb/               # 🧊 FBX → GLB 转换器（浏览器内转换：vendored three r160 的 FBXLoader + GLTFExporter + GLTFLoader，把多个 Mixamo 动作文件合并成一个自带全套 clip 的角色文件；自动挑角色本体 + 骨架名重定向 + 占位 take 名处理 + 实测高度自动厘米→米 + **外部贴图按名字匹配并内嵌进 GLB**（`setURLModifier` 让 loader 自己加载 + 占位槽按名回填）+ **自动减面（vendored meshoptimizer，只重写索引 + 同一张 remap 表压紧所有属性，蒙皮/UV/多材质分组都保留）** + 导出后读回自检 + WebGL 预览；**文件不上传**；设置三组（转换/减面/预览），见 apps/fbx2glb/README.md）
+       ├─ fbx2glb/               # 🧊 FBX → GLB 转换器（浏览器内转换：vendored three r160 的 FBXLoader + GLTFExporter + GLTFLoader，把多个 Mixamo 动作文件合并成一个自带全套 clip 的角色文件；自动挑角色本体 + 骨架名重定向 + 占位 take 名处理 + 实测高度自动厘米→米 + **外部贴图按名字匹配并内嵌进 GLB**（`setURLModifier` 让 loader 自己加载 + 占位槽按名回填）+ **自动减面（vendored meshoptimizer，只重写索引 + 同一张 remap 表压紧所有属性，蒙皮/UV/多材质分组都保留）** + **压缩贴图（等比降分辨率 + 不透明贴图转 JPEG；共享图片只压一次、超大 canvas 有内存护栏）** + 导出后读回自检 + WebGL 预览；**文件不上传**；设置四组（转换/减面/贴图/预览），见 apps/fbx2glb/README.md）
        └─ shooter/               # 🎯 射击竞技场（Three.js 室内 76×76 掩体射击 PvE + Kenney 室内道具（CC0，49 个 .glb/541KB）+ 枪手 AI（复用 `weapons.ts`：预警 0.5s → 打空一梭子 → 换弹）+ 20 块掩体 + 视野遮挡（隐藏/变暗）+ 弹夹/自动换弹 + 背包与物品槽位（20 格 + 主/副武器/投掷/治疗/护甲）+ 备弹（单格 200）+ 护甲穿透（穿甲 0–6 驱动默认公式：甲伤 ×0.7/级、肉伤 100/75/50/0%；**每弹药可按护甲等级覆写甲伤/肉伤表**，样板龙息弹 = Lv4 显示 / 穿甲 0 / 1–4 级甲 100% 甲伤；敌人按波次配甲、六色等级标识）+ 4 把武器 + **满屏分页设置面板（六页：操控/画面/视野/光照/雾/后期；画面含相机高度与水平角度）**，见 apps/shooter/README.md）
 
 **子应用目录内部**（`apps/<id>/`）：
@@ -387,6 +387,19 @@
   一旦违反就整体放弃、保留原几何体并如实上报。**教训**：① 循环里算出来的变量（`slice`）没被用上，
   静态检查看不出来，只有"这个数应该落在什么区间"的断言能抓；② 任何"变换"都要有方向性不变量
   （减面不许变多、压缩不许变大），否则错误会以"更糟但合法"的形式一路显示到界面上。
+- **要"压缩贴图"，别用 three 导出器的 `maxTextureSize`，而且体积的真正开关是贴图不是面数**（FBX→GLB 子应用）：
+  `GLTFExporter` 的 `processImage` 是 `canvas.width = Math.min(image.width, options.maxTextureSize)`、
+  高度同理 —— 宽高**各自**截断，8192×2048 的贴图会被拉成 2048×2048（比例变了、图被压扁）。所以降分辨率要
+  自己按**最长边**等比缩放到 canvas（`drawImage` 一次画完），再把 canvas 当 `texture.image` 交出去。
+  编码格式则由导出器读的 `texture.userData.mimeType` 决定（不透明贴图给 `image/jpeg`，带 alpha 的槽、
+  法线贴图、`transparent` 材质保持 PNG）——这是**唯一**能在导出时换编码的钩子，`image/webp` 会被它降级回
+  PNG。**三个容易忽略的点**：① **共享图片必须只压一次**（同一张 image 被 `map`/`emissiveMap` 共用时，
+  各压一遍会让导出器按 image 对象去重失效 → GLB 里嵌两份、体积翻倍），按"源 image 对象"缓存即可；
+  ② **内存护栏**：把 8192×8192 原样搬进 canvas 再编码要 ~270MB（手机直接 OOM），所以 canvas 像素数要有
+  上限并**跳过 + 说明**，而不是把页面拖死；③ **画布污染**：跨域图片会让 `toBlob` 抛 SecurityError，而那是
+  在**导出器内部**炸 → 整个导出失败，所以在赋值前 `getImageData(0,0,1,1)` 探一下，把全局失败降级成跳过一张。
+  **顺带记一条体量上的经验**：用户那个 264MB 的角色，几何数据只有几 MB（46k 面 + 139k 顶点），**99% 是贴图**
+  —— 「减面」降的是 GPU 负载，「压贴图」才是降文件体积的那一刀，两者不能互相代替。
 - **`session/agent-busy` 这个名字会骗人（顺带记一笔）**：dsh 的 `prompt rejected` 兜底文案挂在 `session/agent-busy` 这个 code 上，实际含义是「附件 admission 抛了非 RemoteError / 非 AttachmentError 的异常」。本项目无关，但排查 DSH 报错时别按「agent 忙」去想。
 
 ---
@@ -421,7 +434,7 @@
     node scripts/verify-shadow.mjs        # 主光阴影盒：矩阵与 three 一致 + 视野覆盖 100% + 亚 texel 不蠕动 + PCF-soft 的 acne/翻转率实测 + **偏航（基与 lookAt 相机一致、9 角度覆盖率 100%、yaw=0 逐位复现）**（22 项断言）
     node scripts/verify-gunner.mjs        # 枪手三档走位 + 原地站定 + 视线门控 + 预警→连发一梭子→换弹时序（发数 = 武器弹夹、梭内间隔 = 武器射速、梭间 = 换弹 + 预警）+ 武器复用负断言 + 同屏弹丸负荷预算 + 弹伤/无敌帧承伤上限 + 环形生成与配比（75 项断言）
     node scripts/verify-zoom-lock.mjs     # 外壳页面缩放锁（顶层 viewport meta + html/.appframe touch-action + iOS gesturestart + dist/ 同步，17 项断言）
-    node scripts/verify-fbx2glb.mjs       # FBX→GLB 子应用（apps/fbx2glb）：真样例走真管线（FBXLoader 解析 → 合并 + 骨架漂移重定向 + 覆盖率门 → GLTFExporter 写 GLB → 容器/自包含断言 → GLTFLoader 读回自检 → 缩放只发生一次）+ 命名/单位/骨架匹配/设置 schema 的纯规则 + **「不上传」源码级断言** + **DOM shim 启动真实 `main.js` 走完整用户流程**（样例→转换→下载不联网→改设置只发一次 PUT→多文件与合并两种模式→恢复默认真的落盘→混拖 FBX+图片按扩展名分流）+ **外部贴图（贴图与 FBX 分体：名字匹配 → `setURLModifier` 交给 loader → 占位槽回填 → 图片真被嵌进 GLB）** + **自动减面（meshoptimizer：只重写索引 + 压紧顶点，蒙皮/UV 不丢；1/3/8/264 个分组的回归门 + 「不能变多」的护栏）** + **输入格式探测（.glb/陌生格式给可读报错）**（408 项断言）
+    node scripts/verify-fbx2glb.mjs       # FBX→GLB 子应用（apps/fbx2glb）：真样例走真管线（FBXLoader 解析 → 合并 + 骨架漂移重定向 + 覆盖率门 → GLTFExporter 写 GLB → 容器/自包含断言 → GLTFLoader 读回自检 → 缩放只发生一次）+ 命名/单位/骨架匹配/设置 schema 的纯规则 + **「不上传」源码级断言** + **DOM shim 启动真实 `main.js` 走完整用户流程**（样例→转换→下载不联网→改设置只发一次 PUT→多文件与合并两种模式→恢复默认真的落盘→混拖 FBX+图片按扩展名分流）+ **外部贴图（贴图与 FBX 分体：名字匹配 → `setURLModifier` 交给 loader → 占位槽回填 → 图片真被嵌进 GLB）** + **自动减面（meshoptimizer：只重写索引 + 压紧顶点，蒙皮/UV 不丢；1/3/8/264 个分组的回归门 + 「不能变多」的护栏）** + **输入格式探测（.glb/陌生格式给可读报错）** + **压缩贴图（等比目标尺寸 / 编码按槽位选择 / 共享图片只压一次 / 内存护栏 / 产物里图片数与 mimeType）**（456 项断言）
     curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/api/manifest
     curl -s http://127.0.0.1:3000/api/manifest
     curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/apps/notes/

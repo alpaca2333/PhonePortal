@@ -145,6 +145,27 @@ export function wrapSceneRoot(json: any, scale: number): void {
 }
 
 /** The same operation on a finished GLB (parse → wrap → re-serialize). */
+/**
+ * 产物里"图片占了字节数"——用来回答"压缩贴图到底省了多少"。
+ * 直接数 `json.images` 指向的 bufferView 长度，不需要再编码一遍（这是 8K 贴图上最贵的一步）。
+ * 非 GLB（.gltf 的 data URI）返回 null：那种格式的图片字节算在 base64 里，另有含义。
+ */
+export function glbImageBytes(buffer: ArrayBuffer): number | null {
+  try {
+    const { json } = readGlb(buffer);
+    const images = json?.images;
+    if (!Array.isArray(images)) return 0;
+    let total = 0;
+    for (const image of images) {
+      if (typeof image?.bufferView !== 'number') return null;
+      total += json.bufferViews?.[image.bufferView]?.byteLength ?? 0;
+    }
+    return total;
+  } catch {
+    return null;
+  }
+}
+
 export function scaleGlb(buffer: ArrayBuffer, scale: number): ArrayBuffer {
   if (!Number.isFinite(scale) || scale === 1) return buffer;
   const { json, bin } = readGlb(buffer);

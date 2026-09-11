@@ -10,6 +10,7 @@
  * Two groups, scope `fbx2glb`:
  *   - `convert` → 转换选项: output format, merge, animations, unit scale, clip naming
  *   - `decimate` → 减面: on/off, keep ratio, error ceiling, silhouette lock
+ *   - `texture`  → 贴图压缩: on/off, longest-edge cap, JPEG for opaque maps
  *   - `preview` → 预览: grid, bone display, playback speed
  *
  * ⚠️ THE `<orientation>` LEVEL IS PRESENT BUT HAS NO SEMANTICS HERE — and that is deliberate, so it
@@ -29,6 +30,8 @@ import {
   DECIMATE_LOCK_BORDER_DEFAULT, ERROR_DEFAULT, ERROR_MAX, ERROR_MIN, ERROR_STEP,
   RATIO_DEFAULT, RATIO_MAX, RATIO_MIN, RATIO_STEP,
 } from './decimate.js';
+// 贴图压缩的可选尺寸与默认值同样由消费方（texturepack.ts）拥有。
+import { PACK_JPEG_DEFAULT, PACK_SIZE_DEFAULT, PACK_SIZE_OPTIONS } from './texturepack.js';
 
 export type Orientation = 'portrait' | 'landscape';
 export const ORIENTATIONS: readonly Orientation[] = ['portrait', 'landscape'];
@@ -232,6 +235,84 @@ export function effectiveDecimate(raw: RawSettings, o: Orientation): DecimateSet
 
 export function hasDecimateOverrides(raw: RawSettings): boolean {
   return ORIENTATIONS.some((o) => Object.keys(readDecimateOverrides(raw, o)).length > 0);
+}
+
+// ---------------------------------------------------------------------------
+// texture group —— 压缩贴图
+// ---------------------------------------------------------------------------
+// 体积的真正开关：几何通常只有几 MB，8K 的 PNG 一张就 30–50MB。
+export interface TexturePackSettings {
+  enabled: boolean;
+  /** 最长边上限（0 = 原样，不缩放）。 */
+  maxSize: number;
+  /** 不透明贴图转 JPEG（带 alpha / 法线贴图始终 PNG）。 */
+  jpeg: boolean;
+}
+
+export const TEXTURE_GROUP = 'texture';
+export const TEXTURE_KEYS = ['enabled', 'maxSize', 'jpeg'] as const;
+export type TextureKey = (typeof TEXTURE_KEYS)[number];
+
+/** 「最大边长」只接受预设值（0/512/1024/2048/4096），其它数值吸附到最近的合法值。 */
+export function clampPackSize(v: number): number {
+  if (!Number.isFinite(v)) return PACK_SIZE_DEFAULT;
+  let best: number = PACK_SIZE_OPTIONS[0];
+  for (const option of PACK_SIZE_OPTIONS) {
+    if (Math.abs(option - v) < Math.abs(best - v)) best = option;
+  }
+  return best;
+}
+
+/** 出厂默认：**关闭**——压贴图是有损的。 */
+export function textureDefaults(): TexturePackSettings {
+  return { enabled: false, maxSize: PACK_SIZE_DEFAULT, jpeg: PACK_JPEG_DEFAULT };
+}
+
+export function clampTexture(s: TexturePackSettings): TexturePackSettings {
+  return {
+    enabled: s.enabled === true,
+    maxSize: clampPackSize(s.maxSize),
+    jpeg: s.jpeg !== false,
+  };
+}
+
+function validTextureValue(key: TextureKey, value: unknown): string | number | boolean | undefined {
+  if (key === 'maxSize') return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+export function readTextureOverrides(raw: RawSettings, o: Orientation): Partial<TexturePackSettings> {
+  const group = raw[TEXTURE_GROUP];
+  if (!isPlainObject(group)) return {};
+  const src = group[o];
+  if (!isPlainObject(src)) return {};
+  const out: Partial<TexturePackSettings> = {};
+  for (const k of TEXTURE_KEYS) {
+    const v = validTextureValue(k, src[k]);
+    if (v !== undefined) (out as Record<string, unknown>)[k] = v;
+  }
+  return out;
+}
+
+export function writeTextureOverride(raw: RawSettings, key: TextureKey, value: unknown): void {
+  if (!isPlainObject(raw[TEXTURE_GROUP])) raw[TEXTURE_GROUP] = {};
+  const group = raw[TEXTURE_GROUP] as Record<string, unknown>;
+  for (const o of ORIENTATIONS) {
+    if (!isPlainObject(group[o])) group[o] = {};
+    (group[o] as Record<string, unknown>)[key] = value;
+  }
+}
+
+export function clearTextureGroup(raw: RawSettings): void {
+  delete raw[TEXTURE_GROUP];
+}
+
+export function effectiveTexture(raw: RawSettings, o: Orientation): TexturePackSettings {
+  return clampTexture({ ...textureDefaults(), ...readTextureOverrides(raw, o) });
+}
+
+export function hasTextureOverrides(raw: RawSettings): boolean {
+  return ORIENTATIONS.some((o) => Object.keys(readTextureOverrides(raw, o)).length > 0);
 }
 
 // ---------------------------------------------------------------------------

@@ -13,7 +13,7 @@
  *        → GLTFLoader.parse (self-check: what did we actually write?)
  *        → download link. No byte of it leaves the device.
  */
-import { parseFbx, loadFbxFile, exportScene, selfCheck, downloadBlob,
+import { parseFbx, loadFbxFile, exportScene, selfCheck, downloadBlob, glbImageBytes,
   type ParsedFbx, type SelfCheck } from './src/convert.js';
 import { describeScene, type SceneReport } from './src/analyze.js';
 import { mergeScenes, nameClipsForFile, renameClips, type LoadedFbx } from './src/merge.js';
@@ -21,10 +21,11 @@ import { formatBytes, outputFileName } from './src/names.js';
 import { resolveScale, scaleLabel, type ScaleDecision } from './src/units.js';
 import { createPanel, type PanelHandle } from './src/panel.js';
 import { createPreview, type PreviewHandle } from './src/preview.js';
-import type { ConvertSettings, DecimateSettings, PreviewSettings } from './src/settings.js';
+import type { ConvertSettings, DecimateSettings, PreviewSettings, TexturePackSettings } from './src/settings.js';
 import {
   decimateForExport, decimateSummaryText, type DecimateReport,
 } from './src/decimate.js';
+import { packTextures, packSummaryText, type PackReport } from './src/texturepack.js';
 import {
   IMAGE_EXTENSIONS, externalCounts, isImageFileName, providedFileNames, reportNeedsTextures,
   textureSummaryText, type TextureReport,
@@ -280,6 +281,7 @@ playBtn.addEventListener('click', () => {
 // ---- settings panel --------------------------------------------------------------------------
 let lastConvert: ConvertSettings | null = null;
 let lastDecimate: DecimateSettings | null = null;
+let lastTexture: TexturePackSettings | null = null;
 const panel: PanelHandle = createPanel({
   els: {
     format: byId<HTMLSelectElement>('optFormat'),
@@ -295,6 +297,10 @@ const panel: PanelHandle = createPanel({
     decimateErrorOut: byId<HTMLElement>('optDecimateErrorOut'),
     decimateLock: byId<HTMLInputElement>('optDecimateLock'),
     decimateReset: byId<HTMLButtonElement>('decimateReset'),
+    pack: byId<HTMLInputElement>('optPack'),
+    packSize: byId<HTMLSelectElement>('optPackSize'),
+    packJpeg: byId<HTMLInputElement>('optPackJpeg'),
+    packReset: byId<HTMLButtonElement>('packReset'),
     grid: byId<HTMLInputElement>('optGrid'),
     bones: byId<HTMLInputElement>('optBones'),
     speed: byId<HTMLInputElement>('optSpeed'),
@@ -314,6 +320,8 @@ const panel: PanelHandle = createPanel({
   // 减面只在导出时发生（而且是在克隆体上），所以这里不需要往任何模块转发，只记下当前值供按钮文案/
   // 转换流程读取。拖动滑杆时的实时回调走的是同一个入口。
   onDecimateChange: (s: DecimateSettings) => { lastDecimate = s; updateConvertState(); },
+  // 贴图压缩同样只在导出时发生（在克隆体上），这里只记下当前值。
+  onTextureChange: (s: TexturePackSettings) => { lastTexture = s; },
 });
 
 // ---- conversion ------------------------------------------------------------------------------
@@ -325,6 +333,8 @@ interface Output {
   report: SceneReport;
   /** 这次导出的减面结果（功能关闭时 applied = 0）。 */
   decimate: DecimateReport;
+  /** 这次导出的贴图压缩结果。 */
+  pack: PackReport;
   warnings: string[];
   check: SelfCheck | { error: string };
   from: string;
@@ -374,6 +384,14 @@ function renderResults(): void {
     ];
     detail.textContent = parts.join(' · ');
     li.appendChild(detail);
+
+    const packText = packSummaryText(out.pack);
+    if (packText !== '') {
+      const line = document.createElement('div');
+      line.className = 'result-meta' + (out.pack.packed > 0 ? ' good' : '');
+      line.textContent = packText;
+      li.appendChild(line);
+    }
 
     const decimateText = decimateSummaryText(out.decimate);
     if (decimateText !== '') {
@@ -429,9 +447,10 @@ function renderResults(): void {
  */
 async function emit(
   from: string, root: any, clips: readonly any[], c: ConvertSettings, warnings: readonly string[] = [],
-): Promise<{ decimate: DecimateReport; root: any }> {
+): Promise<{ decimate: DecimateReport; pack: PackReport; root: any }> {
   const d = lastDecimate ?? { enabled: false, ratio: 0.5, error: 0.01, lockBorder: true };
-  const { root: exportRoot, report: decimate } = await decimateForExport(root, d);
+  const t = lastTexture ?? { enabled: false, maxSize: 2048, jpeg: true };
+  const { root: decimatedRoot, report: decimate } = await decimateForExport(root, d);
   if (d.enabled) {
     const text = decimateSummaryText(decimate);
     log(text !== '' ? text : '减面：没有网格被改动', decimate.applied > 0 ? 'ok' : 'warn');
@@ -444,6 +463,19 @@ async function emit(
       }
     }
   }
+  // 贴图压缩在克隆体上就地改 texture（分辨率 + 编码），所以放在减面之后、导出之前。
+  const pack = await packTextures(decimatedRoot, t);
+  if (t.enabled) {
+    const text = packSummaryText(pack);
+    log(text !== '' ? text : '贴图压缩：没有可处理的贴图', pack.packed > 0 ? 'ok' : 'warn');
+    for (const e of pack.entries) {
+      if (e.skip === null) {
+        log(`  · ${e.material}.${e.slot}（${e.name}）：${e.beforeW}×${e.beforeH} → ${e.afterW}×${e.afterH}` +
+          `，${e.mime.replace('image/', '')}${e.shared ? '（复用已压结果）' : ''}，${e.ms} ms`);
+      }
+    }
+  }
+  const exportRoot = decimatedRoot;
   const report = describeScene(exportRoot, clips);
   const decision = resolveScale(c.scaleMode, report.size.y);
   if (decision.autoApplied) {
@@ -452,17 +484,19 @@ async function emit(
   const anim = c.animations ? clips : [];
   const out = await exportScene(exportRoot, { format: c.format, animations: anim, scale: decision.scale });
   const buffer = await out.blob.arrayBuffer();
+  // 产物里图片占多少字节（直接数 GLB 的 bufferView，不用再编码一遍）
+  pack.imageBytes = c.format === 'glb' ? glbImageBytes(buffer) : null;
   const check = await selfCheck(buffer);
   const name = uniqueFileName(from, c.format);
   outputs.push({
     name, blob: out.blob, clips: c.animations ? report.clips.map((x) => x.name) : [],
-    scale: decision, report, decimate, warnings: [...warnings], check, from,
+    scale: decision, report, decimate, pack, warnings: [...warnings], check, from,
   });
   log(`写出 ${name}（${formatBytes(out.bytes)}）` +
     ('error' in check ? ` · 自检失败：${check.error}` : ` · 自检通过（${check.bones} 骨骼）`),
   'error' in check ? 'warn' : 'ok');
   renderResults();
-  return { decimate, root: exportRoot };
+  return { decimate, pack, root: exportRoot };
 }
 
 async function convert(): Promise<void> {

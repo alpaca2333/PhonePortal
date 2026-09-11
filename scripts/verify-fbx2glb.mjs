@@ -109,17 +109,27 @@ function fakeImage() {
   });
   return el;
 }
+const FAKE_CANVAS_LOG = [];
 function fakeCanvas() {
+  const entry = { width: 0, height: 0, draws: [] };
+  FAKE_CANVAS_LOG.push(entry);
   const ctx = {
-    translate() {}, scale() {}, putImageData() {}, drawImage() {},
+    translate() {}, scale() {}, putImageData() {},
+    drawImage(image, ...args) { entry.draws.push({ image, args }); },
     createImageData: (w, h) => ({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h }),
     getImageData: (x, y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h }),
   };
-  return {
-    width: 1, height: 1, getContext: () => ctx,
+  const canvas = {
+    get width() { return entry.width; },
+    set width(v) { entry.width = v; },
+    get height() { return entry.height; },
+    set height(v) { entry.height = v; },
+    getContext: () => ctx,
     toBlob: (cb, mime) => cb(new Blob([SAMPLE_PNG], { type: mime || 'image/png' })),
     toDataURL: (mime) => 'data:' + (mime || 'image/png') + ';base64,' + Buffer.from(SAMPLE_PNG).toString('base64'),
   };
+  entry.canvas = canvas;
+  return canvas;
 }
 
 const THREE = await import(VENDOR);
@@ -961,6 +971,35 @@ section('11. 装配层：DOM shim 启动真实 main.js，跑完整用户流程')
     check(elements.get('optDecimateRatio').value === '0.5', '比例回到 0.5（默认）',
       elements.get('optDecimateRatio').value);
 
+    // ---- 贴图压缩卡片：开关 → 落盘 → 导出 → 日志 ----
+    check(elements.get('optPack').checked === false, '贴图压缩默认关闭（有损操作）');
+    check(elements.get('optPackSize').value === '2048', '默认最大边长 2048',
+      elements.get('optPackSize').value);
+    check(elements.get('optPackSize').disabled === true && elements.get('packReset').disabled === true,
+      '关闭时参数与「恢复默认」都置灰');
+    const putsBeforePack = puts.length;
+    elements.get('optPack').checked = true;
+    elements.get('optPack').dispatch('change');
+    await new Promise((r) => realSetTimeout(r, 600));
+    check(puts.length === putsBeforePack + 1 &&
+      puts[puts.length - 1]?.texture?.portrait?.enabled === true &&
+      puts[puts.length - 1]?.texture?.landscape?.enabled === true, '开关落盘（两个方向都写）',
+      JSON.stringify(puts[puts.length - 1]?.texture));
+    check(elements.get('optPackSize').disabled === false, '打开后可以选尺寸');
+    elements.get('optPackSize').value = '512';
+    elements.get('optPackSize').dispatch('change');
+    await new Promise((r) => realSetTimeout(r, 600));
+    check(puts[puts.length - 1]?.texture?.portrait?.maxSize === 512, '改尺寸会落盘',
+      JSON.stringify(puts[puts.length - 1]?.texture));
+    elements.get('convertBtn').dispatch('click');
+    await settle(150);
+    check(logText().includes('贴图压缩'), '日志里有贴图压缩的结论（样例没有大贴图，会说明没需要处理的）',
+      logText().slice(-200));
+    elements.get('packReset').dispatch('click');
+    await new Promise((r) => realSetTimeout(r, 600));
+    check(elements.get('optPack').checked === false && elements.get('optPackSize').value === '2048',
+      '恢复默认回到「关闭 + 2048」', elements.get('optPackSize').value);
+
     // ---- 多文件 + 「不合并」：一个输入一个产物，各自按自己的文件名命名 ----
     const filesBefore = elements.get('fileList').children.length;
     const fi = elements.get('fileInput');
@@ -1447,6 +1486,143 @@ section('13. 自动减面');
   check(Math.abs(snapped.ratio - 0.5) < 1e-9, '比例按步长吸附', String(snapped.ratio));
   settings.clearDecimateGroup(draw);
   check(!settings.hasDecimateOverrides(draw), '减面组恢复默认');
+}
+
+// =============================================================================================
+// 14. 压缩贴图：等比降分辨率 + 不透明贴图转 JPEG
+// =============================================================================================
+// 这一节回答"文件到底为什么变小"。两条机制各自的坑都钉在这里：
+//   * **等比**：three 导出器自己的 `maxTextureSize` 是宽高各自 `Math.min`，8192×2048 会被拉成方形；
+//     我们按最长边等比缩到 canvas，所以必须断言"非正方形贴图的比例不变"。
+//   * **编码**：导出器读 `texture.userData.mimeType`。不透明贴图给 jpeg，带 alpha / 法线贴图保持 png。
+//   * **共享图片只压一次**：否则同一张图被 map/emissiveMap 共用时会在 GLB 里嵌两份，体积翻倍。
+section('14. 压缩贴图');
+{
+  const pack = await import(new URL('../dist/apps/fbx2glb/src/texturepack.js', import.meta.url).href);
+
+  // ---- 14.1 纯规则 ----
+  const same = pack.targetSizeFor(2048, 2048, 2048);
+  check(!same.scaled && same.width === 2048, '已经在目标尺寸内 → 不缩放');
+  const square = pack.targetSizeFor(8192, 8192, 2048);
+  check(square.scaled && square.width === 2048 && square.height === 2048, '正方形贴图缩到 2048×2048');
+  const wide = pack.targetSizeFor(8192, 2048, 2048);
+  check(wide.scaled && wide.width === 2048 && wide.height === 512,
+    '非正方形贴图等比缩放（8192×2048 → 2048×**512**，不是导出器那种 2048×2048）',
+    `${wide.width}×${wide.height}`);
+  const tall = pack.targetSizeFor(2048, 8192, 1024);
+  check(tall.width === 256 && tall.height === 1024, '竖图同理（2048×8192 → 256×1024）',
+    `${tall.width}×${tall.height}`);
+  check(pack.targetSizeFor(4096, 4096, 0).width === 4096, 'maxSize = 0 → 原样');
+  check(pack.targetSizeFor(0, 0, 2048).scaled === false, '没有尺寸信息不缩放（不产生 0×0）');
+  check(pack.mimeFor('map', { transparent: false }, true) === 'image/jpeg', '不透明底色贴图 → JPEG');
+  check(pack.mimeFor('map', { transparent: true }, true) === 'image/png', '标了 transparent 的材质 → PNG（要保住 alpha）');
+  check(pack.mimeFor('normalMap', {}, true) === 'image/png', '法线贴图 → PNG（JPEG 块状噪声最明显）');
+  check(pack.mimeFor('alphaMap', {}, true) === 'image/png', 'alphaMap → PNG');
+  check(pack.mimeFor('emissiveMap', {}, true) === 'image/jpeg', '自发光贴图 → JPEG');
+  check(pack.mimeFor('map', {}, false) === 'image/png', '关掉 JPEG 开关 → 全部 PNG');
+
+  // ---- 14.2 设置 schema ----
+  check(JSON.stringify(settings.textureDefaults()) === JSON.stringify({ enabled: false, maxSize: 2048, jpeg: true }),
+    '贴图压缩默认关闭（有损操作）', JSON.stringify(settings.textureDefaults()));
+  check(settings.clampPackSize(3000) === 2048 && settings.clampPackSize(NaN) === 2048, '尺寸吸附到最近的预设值');
+  check(settings.effectiveTexture({ texture: { portrait: { maxSize: 999, enabled: true } } }, 'portrait').maxSize === 1024,
+    '脏尺寸被吸附（999 → 1024）');
+  const traw = {};
+  settings.writeTextureOverride(traw, 'maxSize', 512);
+  check(traw.texture.portrait.maxSize === 512 && traw.texture.landscape.maxSize === 512, '贴图设置两个方向都写');
+  check(settings.hasTextureOverrides(traw), 'hasTextureOverrides 为真');
+  settings.clearTextureGroup(traw);
+  check(!settings.hasTextureOverrides(traw), '贴图组恢复默认');
+
+  // ---- 14.3 真压缩：canvas shim 记录尺寸与绘制来源 ----
+  const image = { width: 4096, height: 2048, name: 'body_diffuse' };
+  const normalImage = { width: 4096, height: 2048, name: 'body_normal' };
+  const mat = new THREE.MeshStandardMaterial();
+  mat.name = 'BodyMat';
+  const mapTex = new THREE.Texture(image);
+  mapTex.name = 'body_diffuse';
+  const emisTex = new THREE.Texture(image);      // 与 map 共用同一张 image
+  emisTex.name = 'body_diffuse';
+  const normTex = new THREE.Texture(normalImage);
+  normTex.name = 'body_normal';
+  mat.map = mapTex;
+  mat.emissiveMap = emisTex;
+  mat.normalMap = normTex;
+  const scene2 = new THREE.Group();
+  scene2.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mat));
+
+  FAKE_CANVAS_LOG.length = 0;
+  const packReport = await pack.packTextures(scene2, { enabled: true, maxSize: 1024, jpeg: true });
+  check(packReport.packed === 3, '3 个槽都被处理', String(packReport.packed));
+  check(mapTex.image !== image && mapTex.image.width === 1024 && mapTex.image.height === 512,
+    '底色贴图缩到 1024×512 并换成 canvas', `${mapTex.image.width}×${mapTex.image.height}`);
+  check(emisTex.image === mapTex.image, '共用同一张图的另一个槽复用同一个压缩结果（不重复压缩、不重复内嵌）');
+  check(mat.map.userData.mimeType === 'image/jpeg' && mat.normalMap.userData.mimeType === 'image/png',
+    '编码按槽位决定：底色 jpeg、法线 png',
+    `${mat.map.userData.mimeType} / ${mat.normalMap.userData.mimeType}`);
+  check(image.width === 4096 && image.height === 2048, '源图片对象没有被改动（只改 texture 指向）');
+  check(packReport.entries.filter((e) => e.shared).length === 1, '报告里标出 1 张是复用');
+  check(FAKE_CANVAS_LOG.length === 2, '只创建了 2 个 canvas（共享图片压一次，正常贴图例外）',
+    String(FAKE_CANVAS_LOG.length));
+  check(FAKE_CANVAS_LOG.every((c) => c.draws.length === 1), '每个 canvas 恰好画一次');
+  check(FAKE_CANVAS_LOG[0].draws[0].image === image, '画进去的是源图片');
+  const summary = pack.packSummaryText(packReport);
+  check(summary.includes('4096×2048 → 1024×512') && summary.includes('jpeg/png'), '摘要写出分辨率与编码',
+    summary);
+
+  // ---- 14.4 导出：GLB 里的图片数、编码与字节数 ----
+  const packedOut = await convert.exportScene(scene2, { format: 'glb', animations: [], scale: 1 });
+  const packedBuffer = await packedOut.blob.arrayBuffer();
+  const packedJson = convert.readGlb(packedBuffer).json;
+  check(packedJson.images.length === 2, 'GLB 里只有 2 张图（共享图片没有变成两份）',
+    String(packedJson.images.length));
+  check(packedJson.images.map((i) => i.mimeType).sort().join(',') === 'image/jpeg,image/png',
+    '导出器按 userData.mimeType 分别编码', packedJson.images.map((i) => i.mimeType).join(','));
+  // 每个图片的 bufferView 会补到 4 字节对齐，所以是 ceil(81/4)*4 = 84 一份
+  const paddedPng = Math.ceil(SAMPLE_PNG.length / 4) * 4;
+  check(convert.glbImageBytes(packedBuffer) === 2 * paddedPng,
+    '图片字节数可以从 GLB 直接数出来（不需要再编码一遍）', String(convert.glbImageBytes(packedBuffer)));
+  const packedCheck = await convert.selfCheck(packedBuffer);
+  check(!('error' in packedCheck), '压完贴图的产物照样能被 GLTFLoader 读回',
+    'error' in packedCheck ? packedCheck.error : '');
+
+  // ---- 14.4b 内存护栏：原样转码需要超大 canvas 时跳过并说明 ----
+  const hugeMat = new THREE.MeshStandardMaterial();
+  hugeMat.map = new THREE.Texture({ width: 8192, height: 8192 });
+  const hugeMesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), hugeMat);
+  const hugeReport = await pack.packTextures(hugeMesh, { enabled: true, maxSize: 0, jpeg: true });
+  check(hugeReport.packed === 0 && hugeReport.reason === 'too-big',
+    '8192² 且不缩放：跳过而不是申请一张 ~270MB 的 canvas（手机上会 OOM）',
+    JSON.stringify({ packed: hugeReport.packed, reason: hugeReport.reason }));
+  check(pack.packSummaryText(hugeReport).includes('最大边长'), '并且告诉用户该怎么改',
+    pack.packSummaryText(hugeReport));
+  const downsized = await pack.packTextures(hugeMesh, { enabled: true, maxSize: 2048, jpeg: true });
+  check(downsized.packed === 1, '把最大边长设成 2048 就能压了', String(downsized.packed));
+
+  // ---- 14.5 跳过 / 降级 ----
+  const noImage = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial());
+  const noImageReport = await pack.packTextures(noImage, { enabled: true, maxSize: 1024, jpeg: true });
+  check(noImageReport.packed === 0 && noImageReport.reason === 'no-image', '没有贴图的模型：明确说没有可处理的贴图',
+    JSON.stringify(noImageReport.reason));
+  const smallMat = new THREE.MeshStandardMaterial();
+  smallMat.map = new THREE.Texture({ width: 256, height: 256 });
+  const smallMesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), smallMat);
+  const smallReport = await pack.packTextures(smallMesh, { enabled: true, maxSize: 2048, jpeg: false });
+  check(smallReport.packed === 0 && smallReport.reason === 'at-target',
+    '又小又不转码 → 不动它（并且说明原因）', JSON.stringify(smallReport.reason));
+  const offReport = await pack.packTextures(scene2, { enabled: false, maxSize: 1024, jpeg: true });
+  check(offReport.enabled === false && offReport.packed === 0 && pack.packSummaryText(offReport) === '',
+    '功能关闭时不做任何处理，摘要为空');
+  const savedDocument = globalThis.document;
+  try {
+    delete globalThis.document;
+    const unavailable = await pack.packTextures(scene2, { enabled: true, maxSize: 1024, jpeg: true });
+    check(unavailable.available === false && unavailable.reason === 'unavailable',
+      '没有 canvas 的环境（Node）降级为「不可用」而不是崩', JSON.stringify(unavailable.reason));
+    check(pack.packSummaryText(unavailable).includes('不可用'), '摘要里说明不可用');
+  } finally {
+    globalThis.document = savedDocument;
+  }
 }
 
 // =============================================================================================

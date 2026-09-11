@@ -124,6 +124,34 @@
       UV、多材质分组都保留；误差上限先到就先停，所以"保留比例"是目标而不是保证；小于 64 面的网格不动。</p>
   </section>
 
+  <!-- 贴图压缩：体积的真正开关（几何通常只有几 MB，8K 的 PNG 一张就 30–50MB）。默认关闭。 -->
+  <section class="card">
+    <div class="card-head">
+      <h2>压缩贴图（可选）</h2>
+      <button id="packReset" class="ghost small" type="button">恢复默认</button>
+    </div>
+    <div class="row">
+      <label for="optPack">压缩贴图</label>
+      <input id="optPack" type="checkbox" />
+    </div>
+    <div class="row">
+      <label for="optPackSize">最大边长</label>
+      <select id="optPackSize">
+        <option value="0">原样（不缩放）</option>
+        <option value="512">512</option>
+        <option value="1024">1024</option>
+        <option value="2048">2048</option>
+        <option value="4096">4096</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="optPackJpeg">不透明贴图转 JPEG</label>
+      <input id="optPackJpeg" type="checkbox" />
+    </div>
+    <p class="hint">按<b>最长边等比</b>缩放到 canvas（不像导出器那样把宽高各自截断，8192×2048 不会变成方形）并
+      重设编码：不透明贴图用 JPEG，带 alpha 的槽与<b>法线贴图</b>保持 PNG。同一张图被多个槽共用时只压一次。</p>
+  </section>
+
   <section class="card">
     <div class="card-head">
       <h2>产物</h2>
@@ -183,6 +211,9 @@
         「配套贴图」里，按文件名自动匹配并<b>内嵌进 GLB</b>；没提供的槽会空着，日志里会写清缺哪个名字。
         <code>.tga</code> / <code>.psd</code> / <code>.dds</code> 浏览器解不了，给同名的
         <code>.png</code> / <code>.jpg</code> 即可（按主干名匹配）。内嵌贴图本来就能正常转换。</li>
+      <li><strong>压缩贴图</strong>：默认关闭。降分辨率（最长边等比缩放到 canvas）+ 不透明贴图转 JPEG；
+        带 alpha 与法线贴图保持 PNG；质量由浏览器默认值决定（导出器用 <code>canvas.toBlob</code> 编码，
+        外部指定不了质量）。<b>这才是文件体积的开关</b>——264MB 的角色里通常 99% 是贴图。</li>
       <li><strong>减面</strong>：用 meshoptimizer（wasm 内嵌）做边折叠，<b>保留蒙皮与 UV</b>，只重写索引并压紧
         顶点；默认关闭。有 morph target 的网格会被跳过（减面会毁掉形变）。法线沿用原顶点法线，强减面后
         可能有轻微着色误差——真机上看一眼。</li>

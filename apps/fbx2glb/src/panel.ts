@@ -11,10 +11,11 @@
 import { loadSettings, saveSettings } from '../../../shared/src/settings.js';
 import {
   type ConvertSettings, type DecimateSettings, type PreviewSettings, type RawSettings,
-  DECIMATE_LIMITS, clearConvertGroup, clearDecimateGroup, clearPreviewGroup, createState,
-  effectiveConvert, effectiveDecimate, effectivePreview,
-  hasConvertOverrides, hasDecimateOverrides, hasPreviewOverrides, orientationOf,
-  writeConvertOverride, writeDecimateOverride, writePreviewOverride,
+  type TexturePackSettings,
+  DECIMATE_LIMITS, clearConvertGroup, clearDecimateGroup, clearPreviewGroup, clearTextureGroup,
+  createState, effectiveConvert, effectiveDecimate, effectivePreview, effectiveTexture,
+  hasConvertOverrides, hasDecimateOverrides, hasPreviewOverrides, hasTextureOverrides, orientationOf,
+  writeConvertOverride, writeDecimateOverride, writePreviewOverride, writeTextureOverride,
   SPEED_MAX, SPEED_MIN, SPEED_STEP,
 } from './settings.js';
 
@@ -32,6 +33,10 @@ export interface PanelElements {
   decimateErrorOut: HTMLElement;
   decimateLock: HTMLInputElement;
   decimateReset: HTMLButtonElement;
+  pack: HTMLInputElement;
+  packSize: HTMLSelectElement;
+  packJpeg: HTMLInputElement;
+  packReset: HTMLButtonElement;
   merge: HTMLInputElement;
   animations: HTMLInputElement;
   scale: HTMLSelectElement;
@@ -51,6 +56,8 @@ export interface PanelOptions {
   onPreviewChange: (s: PreviewSettings) => void;
   /** Called on every decimation change, INCLUDING a slider drag (so the UI can preview the numbers). */
   onDecimateChange: (s: DecimateSettings) => void;
+  /** Called on every texture-packing change. */
+  onTextureChange: (s: TexturePackSettings) => void;
 }
 
 export interface PanelHandle {
@@ -58,6 +65,7 @@ export interface PanelHandle {
   convert(): ConvertSettings;
   preview(): PreviewSettings;
   decimate(): DecimateSettings;
+  texture(): TexturePackSettings;
   /** Re-read the viewport orientation and re-apply (a hand-edited file may differ per orientation). */
   refresh(): void;
   /** Flush any pending save (used before a long conversion, so the value is not lost on navigation). */
@@ -74,6 +82,7 @@ export function createPanel(opts: PanelOptions): PanelHandle {
   function convert(): ConvertSettings { return effectiveConvert(raw, orientation); }
   function preview(): PreviewSettings { return effectivePreview(raw, orientation); }
   function decimate(): DecimateSettings { return effectiveDecimate(raw, orientation); }
+  function texture(): TexturePackSettings { return effectiveTexture(raw, orientation); }
 
   function setStatus(text: string, isError = false): void {
     els.status.textContent = text;
@@ -107,6 +116,14 @@ export function createPanel(opts: PanelOptions): PanelHandle {
     // 关掉减面时把三个参数置灰：界面直接反映"这些数现在不影响任何东西"。
     for (const el of [els.decimateRatio, els.decimateError, els.decimateLock]) el.disabled = !dec.enabled;
 
+    const tex = texture();
+    els.pack.checked = tex.enabled;
+    els.packSize.value = String(tex.maxSize);
+    els.packJpeg.checked = tex.jpeg;
+    els.packJpeg.disabled = !tex.enabled;
+    els.packSize.disabled = !tex.enabled;
+    els.packReset.disabled = !hasTextureOverrides(raw);
+
     const p = preview();
     els.grid.checked = p.grid;
     els.bones.checked = p.bones;
@@ -122,6 +139,7 @@ export function createPanel(opts: PanelOptions): PanelHandle {
     opts.onConvertChange(convert());
     opts.onPreviewChange(preview());
     opts.onDecimateChange(decimate());
+    opts.onTextureChange(texture());
   }
 
   async function flush(): Promise<void> {
@@ -157,6 +175,9 @@ export function createPanel(opts: PanelOptions): PanelHandle {
   els.scale.addEventListener('change', () => change((r) => writeConvertOverride(r, 'scaleMode', els.scale.value)));
   els.naming.addEventListener('change', () => change((r) => writeConvertOverride(r, 'clipNaming', els.naming.value)));
 
+  els.pack.addEventListener('change', () => change((r) => writeTextureOverride(r, 'enabled', els.pack.checked)));
+  els.packSize.addEventListener('change', () => change((r) => writeTextureOverride(r, 'maxSize', Number(els.packSize.value))));
+  els.packJpeg.addEventListener('change', () => change((r) => writeTextureOverride(r, 'jpeg', els.packJpeg.checked)));
   els.decimate.addEventListener('change', () => change((r) => writeDecimateOverride(r, 'enabled', els.decimate.checked)));
   els.decimateLock.addEventListener('change', () => change((r) => writeDecimateOverride(r, 'lockBorder', els.decimateLock.checked)));
   // 两个滑杆：拖动时实时反馈（不落盘），松手才写 —— 和预览速度滑杆同一套做法。
@@ -204,6 +225,7 @@ export function createPanel(opts: PanelOptions): PanelHandle {
 
   els.convertReset.addEventListener('click', () => resetGroup(clearConvertGroup, '转换选项已恢复默认'));
   els.decimateReset.addEventListener('click', () => resetGroup(clearDecimateGroup, '减面选项已恢复默认'));
+  els.packReset.addEventListener('click', () => resetGroup(clearTextureGroup, '贴图压缩选项已恢复默认'));
   els.previewReset.addEventListener('click', () => resetGroup(clearPreviewGroup, '预览选项已恢复默认'));
 
   const refresh = (): void => {
@@ -228,5 +250,5 @@ export function createPanel(opts: PanelOptions): PanelHandle {
     apply();
   })();
 
-  return { convert, preview, decimate, refresh, flush };
+  return { convert, preview, decimate, texture, refresh, flush };
 }
