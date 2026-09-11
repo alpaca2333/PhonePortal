@@ -7,13 +7,16 @@
  *
  *   1. stick.ts  — travel/offset/direction math is size independent: |dir| <= 1 for any size,
  *                  exactly 1 at the rim, 0 at the centre, and the classic 148px feel (62.16px)
- *                  is unchanged.
+ *                  is unchanged. Plus the right stick's HORIZONTAL AXIS LOCK.
  *   2. camera.ts — the 「摄像机高度」 multiplier reproduces the reference framing exactly at 1x
  *                  ({height:24, back:15}), and height/distance/pitch move monotonically with it.
+ *                  Plus 「摄像机灵敏度」: the right-stick yaw is a pure function of
+ *                  (anchor, reading, sensitivity) that wraps at the ±180 seam instead of jamming.
  *   3. settings.ts — defaults are the intended ones (portrait 148/26 = the old CSS; landscape
  *                  min(96px,18vh)/8 = the current tuned default; camera 1.0x in both
- *                  orientations), overrides merge sparsely, out-of-range values are clamped so a
- *                  stick can never leave the screen, and unknown keys survive a save.
+ *                  orientations; fire button above the LEFT stick; sensitivity 90°), overrides merge
+ *                  sparsely, out-of-range values are clamped so a stick — or the fire button — can
+ *                  never leave the screen, and unknown keys survive a save.
  *   4. lighting.ts — the 「环境光」 multiplier is linear on the base intensity, is clamped so a
  *                  dirty value can never reach the light, and the top of its range reproduces the
  *                  pre-change hardcoded 1.05 exactly (i.e. the change is reversible by the user).
@@ -31,7 +34,7 @@ const STICK = new URL('../dist/apps/shooter/src/stick.js', import.meta.url);
 const CAMERA = new URL('../dist/apps/shooter/src/camera.js', import.meta.url);
 const SETTINGS = new URL('../dist/apps/shooter/src/settings.js', import.meta.url);
 
-const { TRAVEL_RATIO, MIN_TRAVEL, AIM_DEADZONE, travelForSize, stickOffset, dirFromOffset, isManualAim } =
+const { TRAVEL_RATIO, MIN_TRAVEL, PRESS_TRAVEL_PX, travelForSize, stickOffset, dirFromOffset, axisLockOffset } =
   await import(STICK.href);
 const C = await import(CAMERA.href);
 const S = await import(SETTINGS.href);
@@ -115,24 +118,91 @@ for (let i = 0; i < 5000; i++) {
 }
 check('5000 random samples: |offset| <= travel and |dir| <= 1', sweepOk);
 
-// ---------------------------------------------------------------- right-stick auto-aim deadzone
-check('AIM_DEADZONE is 0.6 (double the old 0.3)', AIM_DEADZONE === 0.6, String(AIM_DEADZONE));
-check('centre and small pushes stay in auto-aim',
-  !isManualAim({ x: 0, y: 0 }) && !isManualAim({ x: 0.3, y: 0 }) && !isManualAim({ x: 0.4, y: 0.4 }) &&
-  !isManualAim({ x: 0.59, y: 0 }) && !isManualAim({ x: 0.6, y: 0 }));
-check('pushes past the deadzone aim manually',
-  isManualAim({ x: 0.61, y: 0 }) && isManualAim({ x: 1, y: 0 }) && isManualAim({ x: 0, y: -0.8 }) &&
-  isManualAim({ x: 0.5, y: 0.5 }));
-check('deadzone is direction independent (length, not axis)',
-  isManualAim({ x: -0.7, y: 0 }) === isManualAim({ x: 0, y: 0.7 }) &&
-  isManualAim({ x: 0, y: 0.7 }) === true);
-{
-  // tie the fraction to real pixels: at 0.6x travel the stick must still auto-aim, at 0.61x not
-  const size = 148, travel = travelForSize(size);
-  const dirAt = (f) => dirFromOffset(stickOffset(0, 0, travel * f, 0, travel), travel);
-  check('0.6x travel = auto-aim, 0.61x travel = manual (in px too)',
-    !isManualAim(dirAt(0.6)) && isManualAim(dirAt(0.61)));
-}
+// ------------------------------------------------- right stick: horizontal-only knob, camera yaw
+// The right stick is a LOOK stick now: one usable axis, and the yaw is a pure function of
+// (anchor, reading, sensitivity). These assertions are the whole contract of that gesture, and they
+// live here (not in verify-panel) because they are geometry, not DOM wiring.
+check('axisLockOffset("x") drops the vertical component',
+  (() => { const o = axisLockOffset({ x: 12, y: -30 }, 'x'); return o.x === 12 && o.y === 0; })());
+check('axisLockOffset("both") is the identity',
+  (() => { const o = axisLockOffset({ x: 12, y: -30 }, 'both'); return o.x === 12 && o.y === -30; })());
+check('axisLockOffset keeps the horizontal reach the full travel',
+  (() => { const travel = travelForSize(148); const raw = stickOffset(0, 0, travel, travel, travel);
+    const locked = axisLockOffset(raw, 'x');
+    // the diagonal is clamped to the circle first, so x is LESS than travel — that is correct and is
+    // exactly why the lock is applied after the clamp rather than before it
+    return Math.hypot(locked.x, locked.y) <= travel + 1e-9 && locked.y === 0 && Math.abs(locked.x - raw.x) < 1e-9; })());
+
+check('YAW_SCALE_DEFAULT is 90 degrees at full deflection', C.YAW_SCALE_DEFAULT === 90, String(C.YAW_SCALE_DEFAULT));
+check('yaw scale limits bracket the default', C.YAW_SCALE_MIN < C.YAW_SCALE_DEFAULT && C.YAW_SCALE_DEFAULT < C.YAW_SCALE_MAX);
+check('clampYawScale clamps both ends and falls back on dirty data',
+  C.clampYawScale(1) === C.YAW_SCALE_MIN && C.clampYawScale(9999) === C.YAW_SCALE_MAX &&
+  C.clampYawScale(NaN) === C.YAW_SCALE_DEFAULT && C.clampYawScale('90') === C.YAW_SCALE_DEFAULT);
+check('stickYawTarget: centred pad = the anchor (no drift, no snap)',
+  C.stickYawTarget(37, 0, 90) === 37);
+// DIRECTION (the real-device 「右摇杆操作反向」 fix): ψ > 0 makes the WORLD rotate left, so a rightward
+// reading must DECREASE ψ. Pin it as "pushing right turns the view right", not just as a sign.
+check('stickYawTarget: pushing RIGHT turns the view RIGHT (ψ decreases)',
+  C.stickYawTarget(0, 1, 90) === -90, String(C.stickYawTarget(0, 1, 90)));
+check('stickYawTarget: pushing LEFT turns the view LEFT (ψ increases)',
+  C.stickYawTarget(0, -1, 90) === 90, String(C.stickYawTarget(0, -1, 90)));
+check('stickYawTarget: half deflection is half the turn',
+  C.stickYawTarget(0, 0.5, 90) === -45);
+check('stickYawTarget: the sensitivity really scales the gesture',
+  // ±180 is the same angle and `wrapYawDeg` normalises -180 to +180, so compare magnitude there.
+  Math.abs(C.stickYawTarget(0, 1, 180)) === 180 && C.stickYawTarget(0, 1, C.YAW_SCALE_MIN) === -C.YAW_SCALE_MIN,
+  `${C.stickYawTarget(0, 1, 180)} / ${C.stickYawTarget(0, 1, C.YAW_SCALE_MIN)}`);
+check('stickYawTarget wraps across the ±180 seam instead of jamming at it',
+  C.stickYawTarget(170, 1, 90) === 80 && C.stickYawTarget(-170, -1, 90) === -80);
+check('stickYawTarget: dirty input is survivable',
+  C.stickYawTarget(NaN, NaN, NaN) === 0 && Number.isFinite(C.stickYawTarget(1e9, 1e9, 90)));
+check('wrapYawDeg: 0/180/-180/360 map into (-180, 180]',
+  C.wrapYawDeg(0) === 0 && C.wrapYawDeg(180) === 180 && C.wrapYawDeg(-180) === 180 &&
+  C.wrapYawDeg(360) === 0 && C.wrapYawDeg(-190) === 170 && C.wrapYawDeg(NaN) === 0);
+check('the desktop fallback scale is a sane positive number',
+  C.MOUSE_YAW_DEG_PER_PX > 0 && C.MOUSE_YAW_DEG_PER_PX < 2, String(C.MOUSE_YAW_DEG_PER_PX));
+
+// ------------------------------------------ the look pad is PRESS-ANCHORED (no fixed base, no ball)
+// The 「每次按右边区域都会有朝向跳变」 fix: a centre-origin control measures from the element's middle,
+// so landing anywhere off-centre starts at a large reading. Press-anchored means the landing point IS
+// the zero, so the reading starts at exactly 0 wherever you touch.
+check('PRESS_TRAVEL_PX is a sane one-thumb drag',
+  PRESS_TRAVEL_PX >= 40 && PRESS_TRAVEL_PX <= 200, String(PRESS_TRAVEL_PX));
+check('a press-anchored control reads EXACTLY zero at the landing point',
+  // The origin IS the landing point, so the offset at the moment of landing is zero for EVERY
+  // possible landing point — including the corners and edges of a large pad.
+  [[0, 0], [17, 260], [400, 3], [1234, 567], [-50, 90]].every(([x, y]) => {
+    const o = stickOffset(x, y, x, y, PRESS_TRAVEL_PX);
+    return o.x === 0 && o.y === 0;
+  }));
+check('…and the OLD centre origin would have started near full deflection (the jump this removes)',
+  (() => {
+    const cx = 100, cy = 100;                      // rectangle centre
+    const px = 100 + PRESS_TRAVEL_PX, py = 100;    // land a full travel to the right of centre
+    const before = dirFromOffset(stickOffset(cx, cy, px, py, PRESS_TRAVEL_PX), PRESS_TRAVEL_PX);
+    const after = dirFromOffset(stickOffset(px, py, px, py, PRESS_TRAVEL_PX), PRESS_TRAVEL_PX);
+    return Math.abs(before.x) > 0.99 && after.x === 0 && after.y === 0;
+  })());
+check('full deflection is still exactly 1 travel from the landing point (and half is half)',
+  (() => {
+    const full = dirFromOffset(stickOffset(0, 0, PRESS_TRAVEL_PX, 0, PRESS_TRAVEL_PX), PRESS_TRAVEL_PX);
+    const half = dirFromOffset(stickOffset(0, 0, PRESS_TRAVEL_PX / 2, 0, PRESS_TRAVEL_PX), PRESS_TRAVEL_PX);
+    return full.x === 1 && Math.abs(half.x - 0.5) < 1e-12;
+  })());
+check('the pad travel is a FIXED distance, unlike the left stick\'s size-derived one',
+  // The stick's travel follows the element so its feel is size-independent; the pad cannot use that
+  // rule, because "full push" has to mean the same gesture wherever the finger landed.
+  travelForSize(200) !== PRESS_TRAVEL_PX && travelForSize(368) !== PRESS_TRAVEL_PX,
+  `stick(200)=${travelForSize(200)} stick(368)=${travelForSize(368)} pad=${PRESS_TRAVEL_PX}`);
+// The desktop drag must agree with the pad, so it goes through the same sign rule.
+check('lookYawFromPixels: dragging right turns the view right, same as the pad',
+  C.lookYawFromPixels(0, 100) === -100 * C.MOUSE_YAW_DEG_PER_PX &&
+  C.lookYawFromPixels(0, -100) === 100 * C.MOUSE_YAW_DEG_PER_PX,
+  `${C.lookYawFromPixels(0, 100)} / ${C.lookYawFromPixels(0, -100)}`);
+check('lookYawFromPixels: zero drag = the anchor, and it wraps',
+  C.lookYawFromPixels(12, 0) === 12 && Number.isFinite(C.lookYawFromPixels(NaN, NaN)));
+check('lookYawFromPixels does NOT clamp the pixel scale into the stick range',
+  Math.abs(C.lookYawFromPixels(0, 1)) < 1, String(C.lookYawFromPixels(0, 1)));
 
 // ---------------------------------------------------------------- settings.ts
 const portraitVp = { width: 400, height: 800 };
@@ -144,8 +214,10 @@ check('orientationOf(500,500) = portrait', S.orientationOf(500, 500) === 'portra
 
 const dp = S.defaultsFor('portrait', portraitVp);
 const dl = S.defaultsFor('landscape', landscapeVp);
-check('portrait defaults = 148 / 26 (old CSS)', sameLayout(dp, { sizePx: 148, leftX: 26, leftY: 26, rightX: 26, rightY: 26 }), JSON.stringify(dp));
-check('landscape defaults = min(96,18vh)=72 / 8', sameLayout(dl, { sizePx: 72, leftX: 8, leftY: 8, rightX: 8, rightY: 8 }), JSON.stringify(dl));
+check('portrait defaults = 148 / 26 (old CSS) + fire button above the left stick',
+  sameLayout(dp, { sizePx: 148, leftX: 26, leftY: 26, rightX: 26, rightY: 26, fireX: 26, fireY: 26 + 148 + 14, yawScaleDeg: 90 }), JSON.stringify(dp));
+check('landscape defaults = min(96,18vh)=72 / 8 + fire button above the left stick',
+  sameLayout(dl, { sizePx: 72, leftX: 8, leftY: 8, rightX: 8, rightY: 8, fireX: 8, fireY: 8 + 72 + 14, yawScaleDeg: 90 }), JSON.stringify(dl));
 check('landscape default caps at 96 on tall viewports', S.defaultsFor('landscape', { width: 900, height: 900 }).sizePx === 96);
 
 check('createState(null) = {}', JSON.stringify(S.createState(null)) === '{}');
@@ -155,7 +227,8 @@ check('createState("x") = {}', JSON.stringify(S.createState('x')) === '{}');
 // sparse merge: untouched keys keep following the default
 const raw = S.createState({ stick: { landscape: { sizePx: 96 } } });
 const eff = S.effectiveFor(raw, 'landscape', landscapeVp);
-check('override merges sparsely (size 96, insets stay 8)', sameLayout(eff, { sizePx: 96, leftX: 8, leftY: 8, rightX: 8, rightY: 8 }), JSON.stringify(eff));
+check('override merges sparsely (size 96, insets stay 8, fire button tracks the new size)',
+  sameLayout(eff, { sizePx: 96, leftX: 8, leftY: 8, rightX: 8, rightY: 8, fireX: 8, fireY: 8 + 96 + 14, yawScaleDeg: 90 }), JSON.stringify(eff));
 check('portrait is unaffected by a landscape override', S.effectiveFor(raw, 'portrait', portraitVp).sizePx === 148);
 check('hasStickOverrides true for landscape / false for portrait', S.hasStickOverrides(raw, 'landscape') && !S.hasStickOverrides(raw, 'portrait'));
 
@@ -172,6 +245,80 @@ check('tiny viewport: size <= 0.5*vh and inset keeps the stick on screen', small
 // hand-edited / hostile values are ignored, not fatal
 const junk = S.effectiveFor(S.createState({ stick: { landscape: { sizePx: '96', leftX: 12, rightY: null } } }), 'landscape', landscapeVp);
 check('non-numeric override ignored (size falls back to 72)', junk.sizePx === 72 && junk.leftX === 12, JSON.stringify(junk));
+
+// ------------------------------------------- fire button position + camera sensitivity (操控)
+// Both live in the `stick` (操控) group; the position is DRAGGED rather than slid, so its contract is
+// "insets from the right/bottom, clamped so the whole button stays on screen".
+const fireFit = S.effectiveFor(S.createState({ stick: { landscape: {} } }), 'landscape', landscapeVp);
+check('fire button default sits clear of the left stick (above it, not on it)',
+  fireFit.fireY > fireFit.leftY + fireFit.sizePx, `${fireFit.fireY} vs ${fireFit.leftY + fireFit.sizePx}`);
+check('fire button default shares the left stick column', fireFit.fireX === fireFit.leftX);
+const fireMoved = S.effectiveFor(
+  S.createState({ stick: { landscape: { fireX: 120, fireY: 40 } } }), 'landscape', landscapeVp);
+check('an explicit fire position overrides the default', fireMoved.fireX === 120 && fireMoved.fireY === 40,
+  JSON.stringify(fireMoved));
+check('a size override still moves the DEFAULT fire position (no overlap after enlarging the stick)',
+  S.effectiveFor(S.createState({ stick: { landscape: { sizePx: 200 } } }), 'landscape', landscapeVp).fireY === 8 + 200 + 14);
+const fireWild = S.effectiveFor(
+  S.createState({ stick: { landscape: { fireX: 9999, fireY: 9999 } } }), 'landscape', landscapeVp);
+check('the fire button is clamped so the whole button stays on screen',
+  fireWild.fireX === landscapeVp.width - S.FIRE_BTN_SIZE_PX &&
+  fireWild.fireY === landscapeVp.height - S.FIRE_BTN_SIZE_PX, JSON.stringify(fireWild));
+const fireNeg = S.effectiveFor(
+  S.createState({ stick: { landscape: { fireX: -50, fireY: -50 } } }), 'landscape', landscapeVp);
+check('negative fire insets clamp to the edges', fireNeg.fireX === 0 && fireNeg.fireY === 0, JSON.stringify(fireNeg));
+check('a tiny viewport still leaves the fire button reachable',
+  (() => { const s = S.effectiveFor(S.createState({ stick: {} }), 'portrait', { width: 100, height: 120 });
+    return s.fireX >= 0 && s.fireY >= 0; })());
+
+const scaleRaw = S.createState({ stick: { portrait: { yawScaleDeg: 150 } } });
+check('camera sensitivity round-trips through the 操控 group',
+  S.effectiveFor(scaleRaw, 'portrait', portraitVp).yawScaleDeg === 150);
+check('camera sensitivity falls back to the default when absent',
+  S.effectiveFor(S.createState({}), 'portrait', portraitVp).yawScaleDeg === 90);
+const scaleWild = S.effectiveFor(S.createState({ stick: { portrait: { yawScaleDeg: 9999 } } }), 'portrait', portraitVp);
+check('camera sensitivity clamps to the leaf module range',
+  scaleWild.yawScaleDeg === C.YAW_SCALE_MAX, String(scaleWild.yawScaleDeg));
+check('camera sensitivity survives dirty data (string / null -> default)',
+  S.effectiveFor(S.createState({ stick: { portrait: { yawScaleDeg: '90' } } }), 'portrait', portraitVp).yawScaleDeg === 90 &&
+  S.effectiveFor(S.createState({ stick: { portrait: { yawScaleDeg: null } } }), 'portrait', portraitVp).yawScaleDeg === 90);
+check('操控 overrides are detected when ONLY the fire button / sensitivity moved',
+  S.hasStickOverrides(S.createState({ stick: { portrait: { fireX: 10 } } }), 'portrait') &&
+  S.hasStickOverrides(S.createState({ stick: { portrait: { yawScaleDeg: 50 } } }), 'portrait'));
+check('操控 reset clears the fire position and the sensitivity too',
+  (() => { const r = S.createState({ stick: { portrait: { fireX: 10, yawScaleDeg: 50 } } });
+    S.clearStickOverrides(r, 'portrait');
+    const e = S.effectiveFor(r, 'portrait', portraitVp);
+    return e.fireX === 26 && e.yawScaleDeg === 90; })());
+
+// ------------------------------------------------- the right stick is a LOOK PAD (viewport-sized)
+// Its size is NOT `sizePx`: the pad is the camera's touch area, so it is derived from the viewport
+// (which keeps it big in landscape, where sizePx is only 72). What needs pinning is that it stays
+// inside the viewport and that the right insets are capped against the PAD, not against the stick.
+const padP = S.lookPadSize(portraitVp);
+const padL = S.lookPadSize(landscapeVp);
+check('lookPadSize follows the viewport fractions when they are above the floor',
+  (() => { const vp = { width: 900, height: 900 }; const p = S.lookPadSize(vp);
+    return p.w === Math.round(vp.width * S.LOOK_PAD_W_FRAC) && p.h === Math.round(vp.height * S.LOOK_PAD_H_FRAC); })(),
+  JSON.stringify(S.lookPadSize({ width: 900, height: 900 })));
+check('the pad floors stop a narrow viewport from shrinking it to nothing',
+  (() => { const p = S.lookPadSize(portraitVp);
+    return p.w === S.LOOK_PAD_W_MIN && p.h >= S.LOOK_PAD_H_MIN; })(), JSON.stringify(padP));
+check('the pad stays big in landscape even though sizePx shrinks there',
+  padL.w > S.defaultsFor('landscape', landscapeVp).sizePx * 2 &&
+  padL.h > S.defaultsFor('landscape', landscapeVp).sizePx,
+  `${JSON.stringify(padL)} vs sizePx ${S.defaultsFor('landscape', landscapeVp).sizePx}`);
+check('the pad never exceeds the viewport (floors are clamped down)',
+  (() => { const t = S.lookPadSize({ width: 120, height: 90 });
+    return t.w <= 120 && t.h <= 90 && t.w > 0 && t.h > 0; })(), JSON.stringify(S.lookPadSize({ width: 120, height: 90 })));
+check('lookPadSize survives a zero/negative viewport without producing 0 or NaN',
+  (() => { const z = S.lookPadSize({ width: 0, height: 0 });
+    return z.w >= 1 && z.h >= 1 && Number.isFinite(z.w) && Number.isFinite(z.h); })());
+check('right insets are capped against the PAD so it cannot be pushed off screen',
+  (() => { const vp = { width: 400, height: 869 };
+    const pad = S.lookPadSize(vp);
+    const wild = S.effectiveFor(S.createState({ stick: { portrait: { rightX: 9999, rightY: 9999 } } }), 'portrait', vp);
+    return wild.rightX <= Math.max(0, vp.width - pad.w) && wild.rightY <= Math.max(0, vp.height - pad.h); })());
 
 // forward compatibility: keys this build does not know must survive a save
 const keep = S.createState({ stick: { landscape: { sizePx: 96 } }, future: { mode: 'x' } });

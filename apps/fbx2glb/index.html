@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#ff8a65" />
+<title>FBX → GLB 转换器</title>
+<link rel="stylesheet" href="./styles.css" />
+<!-- The single bare specifier in the app: three's own addons import 'three', and the browser has no
+     import map by default. Same vendored build the shooter uses (see vendor/README.md). -->
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js" } }
+</script>
+</head>
+<body>
+<div id="app">
+  <header id="top">
+    <h1>FBX → GLB</h1>
+    <p class="sub">在本机把 FBX 转成 glTF / GLB。多个 Mixamo 动作文件（每个文件一个动作）可以合并成
+      <strong>一个自带全部动作</strong>的角色文件 —— 整个转换只发生在这台设备的浏览器里，文件不会上传。</p>
+  </header>
+
+  <!-- Pick / drop. The <label> wraps the input so tapping anywhere in the zone opens the picker. -->
+  <section class="card">
+    <label id="dropzone" class="dropzone" for="fileInput">
+      <span class="dz-icon" aria-hidden="true">📦</span>
+      <span class="dz-title">选择 .fbx 文件</span>
+      <span class="dz-hint">可多选，也可以把文件拖进来</span>
+      <input id="fileInput" type="file" accept=".fbx" multiple hidden />
+    </label>
+    <div class="btn-row">
+      <button id="sampleBtn" class="ghost" type="button">载入样例</button>
+      <button id="clearBtn" class="ghost" type="button">清空</button>
+      <span id="fileCount" class="hint"></span>
+    </div>
+    <ul id="fileList" class="list"></ul>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>转换选项</h2>
+      <button id="convertReset" class="ghost small" type="button">恢复默认</button>
+    </div>
+    <div class="row">
+      <label for="optFormat">导出格式</label>
+      <select id="optFormat">
+        <option value="glb">GLB · 单文件二进制（推荐）</option>
+        <option value="gltf">glTF · JSON（内嵌 base64）</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="optMerge">合并成一个文件</label>
+      <input id="optMerge" type="checkbox" />
+    </div>
+    <div class="row">
+      <label for="optAnim">导出动画</label>
+      <input id="optAnim" type="checkbox" />
+    </div>
+    <div class="row">
+      <label for="optScale">单位缩放</label>
+      <select id="optScale">
+        <option value="auto">自动（量出是厘米就 ×0.01）</option>
+        <option value="keep">保持原样 ×1</option>
+        <option value="cm">强制厘米 → 米 ×0.01</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="optNaming">动作命名</label>
+      <select id="optNaming">
+        <option value="file">按文件名（把文件命名为 idle.fbx / run.fbx）</option>
+        <option value="clip">按文件里的动作名（mixamo.com 这类占位名会退回文件名）</option>
+      </select>
+    </div>
+    <p id="saveState" class="hint"></p>
+    <button id="convertBtn" class="primary" type="button" disabled>转换</button>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>产物</h2>
+      <span id="resultCount" class="hint"></span>
+    </div>
+    <ul id="results" class="list"></ul>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>预览</h2></div>
+    <div class="preview-wrap">
+      <canvas id="previewCanvas"></canvas>
+      <!-- Shown when createPreview() could not get a WebGL context (see src/preview.ts). -->
+      <p id="previewFallback" class="hint" hidden>本设备没有可用的 WebGL，预览不可用（转换不受影响）。</p>
+    </div>
+    <div class="row">
+      <label for="clipSelect">动作</label>
+      <select id="clipSelect" disabled></select>
+      <button id="playBtn" class="ghost small" type="button">播放</button>
+    </div>
+    <div class="row">
+      <label for="optGrid">显示网格</label>
+      <input id="optGrid" type="checkbox" />
+    </div>
+    <div class="row">
+      <label for="optBones">显示骨骼</label>
+      <input id="optBones" type="checkbox" />
+    </div>
+    <div class="row">
+      <label for="optSpeed">预览速度</label>
+      <input id="optSpeed" type="range" min="0.1" max="2" step="0.1" value="1" />
+      <span id="optSpeedOut" class="out">×1.0</span>
+    </div>
+    <div class="btn-row">
+      <button id="previewReset" class="ghost small" type="button">恢复默认</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>日志</h2></div>
+    <div id="log" class="log"></div>
+  </section>
+
+  <details class="card notes">
+    <summary>说明与已知限制</summary>
+    <ul>
+      <li><strong>不上传</strong>：解析、合并、导出、自检全部在这个页面的 JS 里完成，没有一次网络请求
+        涉及你的模型文件。</li>
+      <li><strong>合并</strong>：以「带蒙皮网格、骨骼最多」的那个文件作为角色本体，其它文件只贡献动画片段；
+        骨架对不上的文件会被跳过并在日志里说明原因。</li>
+      <li><strong>动作命名</strong>：Mixamo 每个文件的 take 都叫 <code>mixamo.com</code>，所以默认按文件名命名
+        —— 把下载的动作依次改名成 <code>idle.fbx</code>、<code>run.fbx</code> 再合并，产物里的动作名就是
+        <code>idle</code>、<code>run</code>。</li>
+      <li><strong>单位</strong>：Mixamo 的角色是 100 单位高的「厘米模型」，自动模式量出高度大于 20 就 ×0.01。
+        预览显示的是原始尺寸，导出时才应用缩放。</li>
+      <li><strong>外部贴图</strong>：FBX 若把贴图作为<b>外部文件</b>引用，浏览器拿不到那些文件，产物会缺贴图
+        （内嵌贴图正常）。FBX 自带的材质颜色会保留。</li>
+      <li><strong>不做</strong>：不居中、不修朝向、不改骨骼名、不重定向不同骨架的动画。</li>
+      <li><strong>预览</strong>：需要 WebGL（真机确认项），手机上大模型转动可能掉帧。</li>
+    </ul>
+  </details>
+</div>
+<script type="module" src="./main.js"></script>
+</body>
+</html>

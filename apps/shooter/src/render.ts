@@ -28,8 +28,9 @@ import { MUZZLE_Y } from './muzzle.js';
 import { fxLightScale } from './fxlight.js';
 import { noise2 } from './noise.js';
 import {
-  ammoReadout, actionButtonReadout, armorReadout, reloadBarProgress,
+  ammoReadout, actionButtonReadout, reloadBarProgress,
   ARMOR_BAR_H, ARMOR_BAR_Y, BAR_H, BAR_PAD, BAR_W, BAR_Y,
+  PLAYER_ARMOR_BAR_Y, PLAYER_BAR_W, PLAYER_BAR_Y, PLAYER_RELOAD_BAR_Y,
   MAX_BAR_SLOTS, MAX_ENEMY_BARS, createBarAllocator,
 } from './hud.js';
 // Item vocabulary (short labels, level, stack count) for the action buttons; the same helpers the
@@ -190,14 +191,16 @@ const LASER_Y = 0.07;         // just above the ground plane/grid
 const LASER_COLOR = 0xff2a12; // red-dominant: additive clipping rule, see projectiles.ts
 const LASER_OPACITY = 0.5;    // overall faintness
 // The world-space bar GEOMETRY (widths, heights, frame padding, and the clearance between the health
-// bar and the armour strip) lives in hud.ts, because "the two enemy bars must not touch" is a rule
-// that has to be asserted in Node — measuring the gap between FILL edges instead of FRAME edges is
-// what made the armour strip overlap the health bar on a real device. See hud.ts::ARMOR_BAR_Y.
-// The player's reload bar rides the SAME two InstancedMeshes as the enemy health bars (so it adds
-// no draw call), sits a little higher than them (2.6 vs 2.3) so it cannot be mistaken for an
-// enemy's HP, and uses the UI accent colour for the same reason — green/amber/red is reserved for
-// health. Only visible while `player.reloadTimer > 0`; see `writeBarFrame()` / `sync()`.
-const PLAYER_BAR_Y = 2.6;
+// bar and the armour strip) lives in hud.ts, because "the two bars must not touch" is a rule that has
+// to be asserted in Node — measuring the gap between FILL edges instead of FRAME edges is what made
+// the armour strip overlap the health bar on a real device. See hud.ts::ARMOR_BAR_Y (enemy) and
+// hud.ts::PLAYER_ARMOR_BAR_Y (player).
+// The player's HEALTH bar, ARMOUR strip and RELOAD bar ride the SAME two InstancedMeshes as the enemy
+// bars (so they add no draw call) and stack in one clear order above the player's own head
+// (`PLAYER_BAR_Y` → `PLAYER_ARMOR_BAR_Y` → `PLAYER_RELOAD_BAR_Y`, each exactly one frame-gap apart).
+// The player's bars are genuinely WIDER (`PLAYER_BAR_W`): fill length already carries the fraction and
+// the armour colour already carries the plate level, so WIDTH is the one free channel left to say
+// "this bar is mine".
 const RELOAD_BAR_COLOR = 0x40c4ff;   // == --accent in styles.css
 // Fill colour as the bar empties: green -> amber -> red.
 function barFillColor(ratio: number): number {
@@ -357,7 +360,6 @@ export class GameRenderer {
   private camYaw = CAMERA_YAW_DEFAULT;     // user's 「摄像机水平角度」 in degrees (see camera.ts)
   private playerUpper = 0; // 0..1 upper-body aim blend while firing
   private lastSwing = 0;   // last swingCount seen; an increase restarts the one-shot slice clip
-  private hpfill: HTMLElement;
   private waveEl: HTMLElement;
   private scoreEl: HTMLElement;
   private fpsEl: HTMLElement;
@@ -366,16 +368,12 @@ export class GameRenderer {
   private ammoCountEl: HTMLElement;
   private ammoFillEl: HTMLElement;
   private ammoLevelEl: HTMLElement;
-  private armorChipEl: HTMLElement;
-  private armorFillEl: HTMLElement;
   private throwBtnEl: HTMLButtonElement;
   private healBtnEl: HTMLButtonElement;
   // Cached HUD strings: these change rarely (ammo) or never (weapon name), and writing
   // textContent every frame forces needless layout work on a 60fps loop.
   private hudWeapon = '';
   private hudAmmo = '';
-  private hudArmor = '';
-  private hudArmorColor = '';
   private hudLevel = '';
   private hudLevelColor = '';
   private hudThrow = '';
@@ -420,7 +418,6 @@ export class GameRenderer {
     this.initPixelPass();
     this.playerChar = spawnPrimitive('player');
     this.scene.add(this.playerChar.root);
-    this.hpfill = document.getElementById('hpfill') as HTMLElement;
     this.waveEl = document.getElementById('wave') as HTMLElement;
     this.scoreEl = document.getElementById('score') as HTMLElement;
     this.fpsEl = document.getElementById('fps') as HTMLElement;
@@ -429,8 +426,6 @@ export class GameRenderer {
     this.ammoCountEl = document.getElementById('ammoCount') as HTMLElement;
     this.ammoFillEl = document.getElementById('ammoFill') as HTMLElement;
     this.ammoLevelEl = document.getElementById('ammoLevel') as HTMLElement;
-    this.armorChipEl = document.getElementById('armorChip') as HTMLElement;
-    this.armorFillEl = document.getElementById('armorFill') as HTMLElement;
     this.throwBtnEl = document.getElementById('throwBtn') as HTMLButtonElement;
     this.healBtnEl = document.getElementById('healBtn') as HTMLButtonElement;
     this.resize();
@@ -1569,10 +1564,12 @@ export class GameRenderer {
         const speed = Math.hypot(e.vel.x, e.vel.y);
         if (e.hitFlash > 0) char.play(E_ANIM.hit);
         else if (e.kind === 'gunner') {
-          // Gunner states, in priority order. `aiming` is the sim's telegraph flag, so the pose the
-          // player sees is literally the state that is about to shoot — a tell that cannot lie.
+          // Gunner states, in priority order. `aiming` is the sim's pre-burst telegraph and `firing`
+          // is the burst itself, so the pose the player sees is literally the state that is about to
+          // shoot / is shooting — a tell that cannot lie.
           // Deliberately NOT the melee `attack` clip: a gunner within arm's reach is still shooting.
           if (e.aiming) char.play(E_ANIM.aim);
+          else if (e.firing) char.play(E_ANIM.shoot);
           else if (speed > 0.2) char.play(E_ANIM.walk);
           else char.play(E_ANIM.idle);
         } else if (d < e.r + p.r + 1.2) char.play(E_ANIM.attack);
@@ -1596,16 +1593,17 @@ export class GameRenderer {
     }
 
     // --- gunner aim beams: the telegraph, one instanced quad per aiming enemy ---
-    // Driven by the sim's `Enemy.aiming`, which is derived from the same countdown that fires the
-    // shot, so the tell cannot disagree with the trigger. Brightness ramps up across the telegraph,
-    // which turns the beam itself into a countdown the player can read without watching the enemy.
+    // Driven by the sim's `Enemy.aiming`, which is the PRE-BURST telegraph only (mid-burst the sim
+    // clears it and the tracers do the talking), so the beam stays a warning rather than becoming a
+    // permanent laser. Brightness ramps up across the telegraph, which turns the beam itself into a
+    // countdown the player can read without watching the enemy.
     let beamN = 0;
     for (let i = 0; i < sim.enemies.length && beamN < MAX_AIM_BEAMS; i++) {
       const e = sim.enemies[i];
       if (!e.alive || !e.aiming) continue;
-      // MUST be gated: a gunner that just lost line of sight keeps `aiming` true (the timer rewinds
-      // to exactly one telegraph), so an ungated beam would shoot out of a wall from an enemy the
-      // player cannot see.
+      // MUST be gated: a gunner can have line of sight to the player while sitting outside the
+      // player's own vision (behind the camera cone), and an ungated beam would point at an enemy
+      // the player cannot see — the same leak the health bars had to be gated for.
       if (this.enemyVis[i] !== 1) continue;
       const dx = p.pos.x - e.pos.x;
       const dz = p.pos.y - e.pos.y;
@@ -1863,13 +1861,33 @@ export class GameRenderer {
       }
       drawn++;
     }
-    // The player's reload bar, floating above the character's head. Same pool, same 2 draw calls;
-    // hidden the instant the reload finishes (and while dead — `reloadTimer` freezes on death,
-    // because update() returns early once `sim.over`, so this guard is what keeps a corpse from
-    // showing a permanently half-full reload bar).
-    if (p.alive && p.reloadTimer > 0 && bars.next()) {
-      this.writeBarFrame(bars.frame, p.pos.x, p.pos.y, PLAYER_BAR_Y);
-      this.writeBarFill(bars.fill, p.pos.x, p.pos.y, PLAYER_BAR_Y, reloadBarProgress(p.reloadTimer, p.reloadTotal), RELOAD_BAR_COLOR);
+    // --- the PLAYER's head bars: health, armour strip, then reload (same pool, no extra draw call) --
+    // The plate lives in the armour SLOT of the backpack, so chipping it in the damage path shows up
+    // here with no extra plumbing. All three are gated on `p.alive`: a corpse with a full health bar
+    // would read as "still in the fight", and `reloadTimer` freezes on death (update() returns early
+    // once `sim.over`), so without the gate a body would keep a permanently half-full reload bar.
+    const plate = sim.inventory.slots.armor;
+    if (p.alive) {
+      const hpRatio = p.maxHp > 0 ? Math.max(0, Math.min(1, p.hp / p.maxHp)) : 0;
+      if (bars.next()) {
+        this.writeBarFrame(bars.frame, p.pos.x, p.pos.y, PLAYER_BAR_Y, PLAYER_BAR_W);
+        this.writeBarFill(bars.fill, p.pos.x, p.pos.y, PLAYER_BAR_Y, hpRatio, barFillColor(hpRatio), PLAYER_BAR_W);
+      }
+      // Armour strip, COLOURED BY THE PLATE'S LEVEL (1 white .. 6 red) exactly like the enemy one.
+      // Drawn whenever a plate is EQUIPPED, including at 0 value — a deliberate difference from the
+      // enemy rule (`value > 0`): this bar is the only armour readout in the game now (the top-left
+      // chip is gone), so "plate shot empty" must be distinguishable from "no plate at all". The
+      // empty frame is that distinction; the colour of the fill is the level, never a health colour.
+      if (plate && plate.kind === 'armor' && bars.next()) {
+        this.writeBarFrame(bars.frame, p.pos.x, p.pos.y, PLAYER_ARMOR_BAR_Y, PLAYER_BAR_W, ARMOR_BAR_H);
+        this.writeBarFill(bars.fill, p.pos.x, p.pos.y, PLAYER_ARMOR_BAR_Y, armorRatio(plate),
+          levelColorInt(plate.level), PLAYER_BAR_W, ARMOR_BAR_H);
+      }
+      if (p.reloadTimer > 0 && bars.next()) {
+        this.writeBarFrame(bars.frame, p.pos.x, p.pos.y, PLAYER_RELOAD_BAR_Y, PLAYER_BAR_W);
+        this.writeBarFill(bars.fill, p.pos.x, p.pos.y, PLAYER_RELOAD_BAR_Y,
+          reloadBarProgress(p.reloadTimer, p.reloadTotal), RELOAD_BAR_COLOR, PLAYER_BAR_W);
+      }
     }
     // `bars.frame` / `bars.fill` are -1 when nothing was drawn, so +1 is the instance count.
     const barCount = bars.fill + 1;
@@ -1880,25 +1898,11 @@ export class GameRenderer {
     if (this.barFillMesh.instanceColor) this.barFillMesh.instanceColor.needsUpdate = true;
 
     // --- HUD ---
-    this.hpfill.style.width = Math.max(0, p.hp / p.maxHp) * 100 + '%';
+    // No health/armour DOM writes here on purpose: both are WORLD-SPACE bars above the character's
+    // head now (the block above), so the top-left corner only carries the wave counter. One readout
+    // per fact — a second copy in the DOM is what would eventually disagree with the head bar.
     this.waveEl.textContent = '第 ' + sim.wave + ' 波';
     this.scoreEl.textContent = String(sim.score);
-    // Armour chip: level (coloured with the 1..6 palette), current/max, or 无护甲 / 已损坏. The
-    // plate itself lives in the armour SLOT of the backpack, so chipping it in the damage path is
-    // reflected here with no extra plumbing.
-    const plate = sim.inventory.slots.armor;
-    const ar = armorReadout(plate && plate.kind === 'armor' ? plate : null);
-    if (this.hudArmor !== ar.text) {
-      this.hudArmor = ar.text;
-      this.armorChipEl.textContent = ar.text;
-    }
-    this.armorFillEl.style.width = ar.ratio * 100 + '%';
-    const armorColor = ar.level === null ? NO_LEVEL_COLOR : levelColorHex(ar.level);
-    if (this.hudArmorColor !== armorColor) {
-      this.hudArmorColor = armorColor;
-      this.armorChipEl.style.color = armorColor;
-      this.armorFillEl.style.background = armorColor;
-    }
     // Weapon + magazine + backpack reserve. All of it is derived from sim state, so switching
     // weapons (or dragging a different one into a slot) needs no HUD code: the name, the count,
     // the reserve and the reload bar all follow the inventory.

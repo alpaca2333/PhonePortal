@@ -11,8 +11,8 @@ import {
 } from './config.js';
 import type { BurnStack, CombatContext, EnemyLike, ProjectileDef } from './projectiles.js';
 import { PROJECTILES, ROCKET_BLAST_RADIUS } from './projectiles.js';
-import { getWeaponOrNull, magSizeOf, fireWeapon, ammoIdOf } from './weapons.js';
-import type { FireContext, WeaponDef, WeaponId } from './weapons.js';
+import { getWeaponOrNull, magSizeOf, fireWeapon, ammoIdOf, WEAPONS } from './weapons.js';
+import type { FireContext, RangedWeaponDef, WeaponDef, WeaponId } from './weapons.js';
 // Armour / penetration: the damage split itself is a pure function in armor.ts, so the SAME rule
 // runs for enemies and for the player (whose plate lives in the armour slot of the inventory).
 import { armorForWave, resolveHit } from './armor.js';
@@ -132,20 +132,45 @@ export interface Enemy extends Entity {
   hitFlash: number;
   touchCd: number; // per-enemy contact damage cooldown
   /**
-   * Gunner trigger timer, counting down the WHOLE cycle: `gunnerAimTime + gunnerFireCd` seconds,
-   * of which the last `gunnerAimTime` are the telegraph.
+   * Gunner trigger timer: seconds until the NEXT round leaves the barrel. It spans both trigger
+   * phases — the pre-burst telegraph (`gunnerAimTime` after engaging) and the weapon's cadence
+   * between rounds mid-burst — and it is PAUSED during a reload (the reload owns its own
+   * `reloadT`), then rewound to a full telegraph when the magazine is full again.
    *
-   * WHY ONE TIMER AND NOT `aimT` + `fireT`: two timers can disagree ("is it aiming or cooling
-   * down?"), and every state machine that has to keep them in sync eventually desyncs. Deriving
-   * `aiming` from a single countdown makes that impossible: telegraphed <=> `fireT <= gunnerAimTime`.
-   * Unused by melee kinds.
+   * WHY ONE TIMER AND NOT `aimT` + `fireT`: two countdowns can disagree ("is it aiming or cooling
+   * down?"), and every state machine that has to keep them in sync eventually desyncs. The two
+   * phases are told apart by `firing` instead, which flips once per phase transition rather than
+   * being re-derived from a second timer. Unused by melee kinds.
    */
   fireT: number;
   /**
-   * True while the gunner is inside its pre-shot telegraph. The renderer draws the aim beam from
-   * this flag, so what the player sees and what the sim is about to do come from one source.
+   * True while the gunner is inside the pre-burst TELEGRAPH (no round has left the barrel yet this
+   * engagement). The renderer draws the aim beam from this flag, so the warning and the shot that
+   * follows it come from one source. Never true at the same time as `firing`.
    */
   aiming: boolean;
+  /**
+   * True while the gunner is mid-BURST (it has fired and the magazine is not empty). The renderer
+   * plays the shooting clip from this — `aiming` is only the tell, so without it a 30-round burst
+   * would look like a soldier standing still pointing his gun.
+   */
+  firing: boolean;
+  /**
+   * Rounds left in the current magazine, in SHOTS (mirrors `Player.ammo`). Both the magazine size
+   * and the refill come from the enemy's WEAPON (see `weaponId`), never from CONFIG.
+   */
+  ammo: number;
+  /**
+   * Seconds left of a reload; > 0 means "topping up, not shooting". A reload runs even with no line
+   * of sight, so a gunner that ducks behind cover finishes it instead of being stuck empty forever.
+   */
+  reloadT: number;
+  /**
+   * Which `weapons.ts` entry this enemy shoots. Per-entity data like `speed`: a future gunner
+   * variant only has to seed a different id here. Optional so a hand-built fixture in a script can
+   * omit it — `resolveEnemyWeapon` then falls back to `CONFIG.gunnerWeapon`.
+   */
+  weaponId?: string;
   /**
    * Active damage-over-time stacks (one per pellet that hit; see `applyBurn`). Each stack is
    * independent — its own `endTime`/`nextTick` — so N stacks tick N times per period and
@@ -557,7 +582,19 @@ export class GameSim implements FireContext {
    * The near-reveal radius is part of that shared rule: an enemy closer than `VISION_REVEAL_R`
    * counts as visible even behind cover ("you can hear it"), so it is both drawn and targetable.
    */
-  nearestVisibleEnemy(from: Vec2): Enemy | null {
+  nearestVisibleEnemy(from: Vec2, forward: Vec2 | null = null, halfAngleRad = 0): Enemy | null {
+    // Optional CONE: with `forward` given, only enemies whose direction from `from` is within
+    // `halfAngleRad` of it are candidates. This is what turns "nearest visible" into the aim assist's
+    // "nearest visible IN FRONT OF THE CAMERA" (CONFIG.autoAimConeDeg).
+    //
+    // The test runs on the SQUARED cosine, so the loop needs neither sqrt nor atan2: for a half-angle
+    // below 90 degrees every candidate that could pass has a positive dot product, and for those
+    // `dot^2 >= cos^2 * |d|^2 * |forward|^2` is equivalent to `angle <= halfAngle`.
+    const fx = forward ? forward.x : 0;
+    const fy = forward ? forward.y : 0;
+    const fl2 = fx * fx + fy * fy;
+    const useCone = forward !== null && fl2 > 1e-12;
+    const cos2 = useCone ? Math.cos(halfAngleRad) ** 2 : 0;
     let best: Enemy | null = null;
     let bestD2 = Infinity;
     for (const e of this.enemies) {
@@ -565,6 +602,10 @@ export class GameSim implements FireContext {
       const dx = e.pos.x - from.x;
       const dy = e.pos.y - from.y;
       const d2 = dx * dx + dy * dy;
+      if (useCone) {
+        const dot = dx * fx + dy * fy;
+        if (dot <= 0 || dot * dot < cos2 * d2 * fl2) continue;   // outside the cone
+      }
       if (d2 >= bestD2) continue;   // farther than the incumbent: not a candidate at all
       // Visibility is the expensive half (a segment query against every piece of cover), so it is
       // only paid for candidates that already beat the incumbent. "Nearest" therefore stays
@@ -607,29 +648,44 @@ export class GameSim implements FireContext {
     // strafing along cover feel right without a separate slide/response pass.
     resolveCover(p.pos, p.r, this.obstacles);
     // --- resolve the aim direction ---
-    // A manual stick direction always wins (and is NOT visibility-filtered: a manual shot at a wall
-    // is the player's business). If the right stick is held without a direction (input.autoAim),
-    // lock onto the nearest VISIBLE live enemy instead. Recomputed every frame:
-    // stateless "nearest" is simple and predictable, at the cost of switching targets
-    // when two enemies are nearly equidistant (add hysteresis here if that ever reads bad).
+    // --- resolve the aim direction ---
+    // `input.aim` is the CAMERA'S FORWARD direction on the ground (input.ts maps screen-up through
+    // the current yaw), and the player faces it unconditionally — see the facing block below.
+    //
+    // AIM ASSIST, while the trigger is held only: the nearest VISIBLE enemy within
+    // `CONFIG.autoAimConeDeg` of the CAMERA direction is aimed at instead of straight ahead. Letting
+    // go of the trigger skips this whole block, so the facing falls back to the camera direction on
+    // the very next frame — that is the 「停火后回正」 half of the request, and it needs no extra state
+    // because the assist is an OVERRIDE of this frame's direction, not a mode the player is in.
+    //
+    // ⚠️ THE CONE IS MEASURED FROM `input.aim`, NEVER FROM THE ASSISTED DIRECTION. Feeding last
+    // frame's result back in would let the cone walk toward a target one frame at a time (an enemy at
+    // 16 deg is out of range, but once the facing has been nudged to 15 deg it is in), i.e. the assist
+    // would ratchet onto anything in front. Anchoring on the camera keeps it a pure function of THIS
+    // frame's input, which is also what makes it assertable in Node.
     let aimDir = input.aim;
-    if (input.autoAim && len(aimDir) < 1e-3) {
-      const t = this.nearestVisibleEnemy(p.pos);
+    if (input.autoAim && input.firing) {
+      const t = len(aimDir) > 1e-3
+        ? this.nearestVisibleEnemy(p.pos, aimDir, (CONFIG.autoAimConeDeg * Math.PI) / 180)
+        // No direction at all: keep the historical contract for callers that supply none (fixtures,
+        // and the behaviour snapshot's wave scenarios) — nearest visible enemy, no cone to apply.
+        : this.nearestVisibleEnemy(p.pos);
       if (t) aimDir = norm(sub(t.pos, p.pos));
     }
     const hasAim = len(aimDir) > 1e-3;
     p.moving = len(input.move) > 0.05;
     p.firing = input.firing;
-    // "aiming" = there is a real aim direction AND the player is attacking, which is exactly
-    // when the facing below becomes the aim direction (render.ts shows the aiming line then).
+    // "aiming" = there is a real direction AND the player is attacking, which is exactly when the
+    // aiming line tells the truth (it is drawn from the muzzle along the real firing direction).
     p.aiming = hasAim && p.firing;
-    // Facing priority: aim while FIRING, else the movement direction, else keep the last facing.
-    // Why gate on `firing` instead of `hasAim`: `input.aim` is non-zero even when nobody is
-    // aiming — desktop mouse hover (position relative to the canvas centre) and a stale finger
-    // drag left in `input.mouse` on touch. With `hasAim` alone this branch was true nearly every
-    // frame, so the movement branch never ran and the facing looked hard-coded while walking.
-    // `firing` is the only signal that the player is really aiming (right stick held / LMB down).
-    if (hasAim && p.firing) p.aimAngle = Math.atan2(aimDir.y, aimDir.x);
+    // FACING PRIORITY: the given direction, else the movement direction, else keep the last facing.
+    // The first branch is NOT gated on `firing` any more. It used to be (`hasAim && p.firing`),
+    // because the right stick was an aim stick whose direction only meant something while held, and
+    // because a stale mouse hover would otherwise pin the facing (the old bug below). Now the input
+    // layer supplies the camera's forward direction every frame and the player ALWAYS faces it —
+    // that is the control scheme, not a fallback. The movement/keep branches remain for fixtures and
+    // for a frame with no direction at all (the input can never produce one; a bare `GameSim` can).
+    if (hasAim) p.aimAngle = Math.atan2(aimDir.y, aimDir.x);
     else if (p.moving) p.aimAngle = Math.atan2(input.move.y, input.move.x);
     // attack: the equipped weapon decides whether/how it fires (see weapons.ts), the sim
     // decides whether the magazine AND the backpack reserve allow it.
@@ -1114,6 +1170,9 @@ export class GameSim implements FireContext {
     const gunner = Math.random() < CONFIG.gunnerShare;
     const sprinter = !gunner && this.wave >= 2 && Math.random() < Math.min(0.25 + this.wave * 0.03, 0.5);
     const hp = gunner ? CONFIG.gunnerHp : sprinter ? CONFIG.sprinterHp : CONFIG.baseEnemyHp;
+    // The weapon template every gunner of this wave shoots. `CONFIG.gunnerWeapon` is a plain id, so
+    // config.ts stays dependency-free and the lookup (with its unknown-id fallback) lives here.
+    const gun = this.resolveEnemyWeapon(CONFIG.gunnerWeapon);
     const e: Enemy = {
       id: nid(), pos: this.spawnPos(), vel: v2(0, 0), r: CONFIG.enemyR,
       hp, maxHp: hp,
@@ -1124,9 +1183,10 @@ export class GameSim implements FireContext {
       // Armour by wave (armor.ts::armorForWave + the two CONFIG profiles). Gunners are plated from
       // wave 1; melee rushers only later, so early waves stay about reading the gunfight.
       armor: armorForWave(this.wave, gunner ? CONFIG.gunnerArmor : CONFIG.rusherArmor),
-      // Start one telegraph away from a shot, so a gunner that spawns with a clear line still has
-      // to aim first (see updateGunner).
-      fireT: CONFIG.gunnerAimTime, aiming: false,
+      // Start one telegraph away from a burst, so a gunner that spawns with a clear line still has
+      // to aim first (see updateGunner). The magazine comes from the weapon, not from CONFIG.
+      fireT: CONFIG.gunnerAimTime, aiming: false, firing: false,
+      weaponId: gun.id, ammo: magSizeOf(gun), reloadT: 0,
     };
     this.enemies.push(e);
   }
@@ -1160,14 +1220,39 @@ export class GameSim implements FireContext {
   }
 
   /**
-   * One gunner's frame: hold the preferred range, stand still, telegraph, then shoot.
+   * The ranged weapon an enemy shoots: `Enemy.weaponId` (per-entity, like `speed`) falling back to
+   * `CONFIG.gunnerWeapon`.
    *
-   * The three movement zones are the whole "low aggression, 尽量站在原地" requirement — the middle
-   * zone (`range ± slack`) is where a gunner's velocity is set to exactly zero, so once it has
-   * walked into position it plants and stays planted while the player moves around it.
+   * WHY THE FALLBACK IS HERE AND NOT IN CONFIG: config.ts is the dependency-free tuning leaf and
+   * must not import weapons.ts just to name a type. Unknown / empty / MELEE ids resolve to the
+   * default SMG, so a fixture that omits the field, or a config typo, leaves a gunner that still
+   * shoots instead of one that throws or silently dry-fires forever.
+   */
+  private resolveEnemyWeapon(id: string | undefined): RangedWeaponDef {
+    const w = getWeaponOrNull(id ?? CONFIG.gunnerWeapon);
+    return w && w.kind === 'ranged' ? w : WEAPONS.smg;
+  }
+
+  /**
+   * One gunner's frame: hold the preferred range, stand still, telegraph, then empty a magazine.
+   *
+   * The three movement zones are unchanged (the "尽量站在原地" requirement). What changed with the
+   * aggression rework is the TRIGGER:
+   *   engage -> TELEGRAPH (`gunnerAimTime`, `aiming`) -> BURST (`firing`, one round per weapon
+   *   cadence, until the magazine is empty) -> RELOAD (`reloadT`) -> telegraph again.
+   * Cadence, magazine, reload time, spread, pellet count and muzzle offset are ALL read off the
+   * weapon (`CONFIG.gunnerWeapon`) — nothing here re-declares them, so retuning the SMG retunes
+   * every gunner in the game.
    */
   private updateGunner(e: Enemy, dir: Vec2, d: number, dt: number): void {
     const p = this.player;
+    const w = this.resolveEnemyWeapon(e.weaponId);
+    const mag = magSizeOf(w);
+    // Hand-built fixtures may omit the magazine fields entirely. Normalise them to "a full magazine,
+    // not reloading" instead of letting `undefined - 1` turn the burst into NaN.
+    if (!Number.isFinite(e.ammo)) e.ammo = mag;
+    if (!Number.isFinite(e.reloadT)) e.reloadT = 0;
+    e.firing = e.firing === true;
     // Cover is what makes this a gunfight rather than a shooting gallery: breaking the line does
     // not merely spoil the aim, it stops the shooting entirely.
     const hasLos = !coverBlocks(e.pos, p.pos, this.obstacles);
@@ -1180,7 +1265,7 @@ export class GameSim implements FireContext {
     // "slow this one enemy down" impossible and would silently ignore `Enemy.speed`.
     if (d > band) {
       // Close in slowly, but only while the player is inside the gunner's sight budget: beyond it a
-      // low-aggression enemy holds its ground instead of marching across the map.
+      // gunner holds its ground instead of marching across the map.
       e.vel = hasLos && d <= CONFIG.gunnerSight && p.alive ? scale(dir, e.speed) : v2(0, 0);
     } else if (d < CONFIG.gunnerRange - CONFIG.gunnerRangeSlack) {
       // Back off rather than let the player walk into it for a free melee kill.
@@ -1189,41 +1274,103 @@ export class GameSim implements FireContext {
       e.vel = v2(0, 0);
     }
 
-    // --- trigger: one countdown, telegraph at the end -------------------------------------------
-    if (!engaged) {
-      // Rewind to exactly ONE telegraph away from a shot, so ducking behind cover (or leaving the
-      // range band) always buys the player a full telegraph before the next round. Without this,
-      // popping out mid-cycle could eat a shot with no warning — cover would feel like a coin flip.
+    // --- reload: finish it even with no line of sight -------------------------------------------
+    // A soldier behind cover finishes reloading. Aborting the reload on disengage would leave a
+    // gunner stuck empty forever (nothing else refills it), and would make "pop out, duck back" a
+    // way to disarm the enemy. The next burst still has to earn a fresh telegraph below.
+    if (e.reloadT > 0) {
+      e.reloadT = Math.max(0, e.reloadT - dt);
       e.aiming = false;
+      e.firing = false;
+      if (e.reloadT === 0) {
+        e.ammo = mag;
+        e.fireT = CONFIG.gunnerAimTime;
+      }
+      return;
+    }
+
+    // --- no target: stop shooting, rewind to a full telegraph -----------------------------------
+    // Ducking behind cover (or leaving the band) always buys a complete warning, and it ABORTS the
+    // burst rather than letting it resume mid-magazine the instant the player pops back out.
+    if (!engaged) {
+      e.aiming = false;
+      e.firing = false;
       e.fireT = CONFIG.gunnerAimTime;
       return;
     }
+
+    // --- empty magazine: reload instead of dry-firing -------------------------------------------
+    if (mag > 0 && e.ammo <= 0) {
+      this.startEnemyReload(e, w);
+      return;
+    }
+
+    // --- trigger: telegraph first, then the burst -----------------------------------------------
     e.fireT -= dt;
-    e.aiming = e.fireT <= CONFIG.gunnerAimTime;
-    if (e.fireT <= 0) {
-      this.spawnEnemyRound(e, dir);
-      e.fireT = CONFIG.gunnerAimTime + CONFIG.gunnerFireCd;
-      e.aiming = false;
+    if (e.fireT > 0) {
+      // Pre-burst = the warning beam the player reads; mid-burst = just waiting out the cadence.
+      e.aiming = !e.firing;
+      return;
+    }
+    this.spawnEnemyRound(e, dir, w);
+    e.firing = true;
+    e.aiming = false;
+    // CARRY THE OVERSHOOT, exactly like the player's trigger (see the player fire block): the SMG's
+    // 0.0769s cadence is not a whole number of frames, so resetting to the full cooldown would
+    // quantise the burst UP to the next frame and quietly fire slower than the weapon says. A timer
+    // in debt by a whole cadence is a fresh trigger pull, so only a sub-cadence remainder is carried.
+    const carried = e.fireT + w.cooldown;
+    e.fireT = carried > 0 ? carried : w.cooldown;
+    if (mag > 0) {
+      e.ammo -= 1;
+      // Auto-reload the moment the last round leaves, so the burst runs dry instead of clicking.
+      if (e.ammo <= 0) this.startEnemyReload(e, w);
     }
   }
 
-  /** One enemy round from a gunner's muzzle, with its own spread and the hostile tracer. */
-  private spawnEnemyRound(e: Enemy, dir: Vec2): void {
-    const muzzle = add(e.pos, scale(dir, e.r + 0.3));
-    const a = Math.atan2(dir.y, dir.x) + (Math.random() * 2 - 1) * CONFIG.gunnerSpread;
-    this.bullets.push({
-      pos: muzzle,
-      vel: scale(v2(Math.cos(a), Math.sin(a)), CONFIG.gunnerBulletSpeed),
-      r: CONFIG.gunnerBulletR,
-      life: CONFIG.gunnerBulletLife,
-      damage: CONFIG.gunnerDamage,
-      // The round's penetration level travels with the projectile (single source: the def), so the
-      // player's plate resolves against exactly the ammo the gunner is firing.
-      level: PROJECTILES.enemyRound.level,
-      fromPlayer: false,
-      alive: true,
-      def: PROJECTILES.enemyRound,
-    });
+  /** Begin a reload; the magazine is refilled by `updateGunner` when `reloadT` expires. */
+  private startEnemyReload(e: Enemy, w: RangedWeaponDef): void {
+    e.firing = false;
+    e.aiming = false;
+    e.reloadT = w.reloadTime;
+    // A magazine-fed weapon with reloadTime 0 (a synthetic test weapon) would otherwise never refill
+    // and the gunner would dry-fire forever. Refill on the spot instead.
+    if (e.reloadT <= 0) {
+      e.ammo = magSizeOf(w);
+      e.fireT = CONFIG.gunnerAimTime;
+    }
+  }
+
+  /**
+   * One round from a gunner's muzzle: the WEAPON's spread, pellet count and muzzle offset, but the
+   * hostile `enemyRound` as the projectile.
+   *
+   * WHY NOT THE WEAPON'S OWN PROJECTILE: `WEAPONS.smg.projectile` is a PLAYER round whose `onHit`
+   * damages enemies, so firing it from a gunner would either wound its own team or need a
+   * friendly-fire branch inside the projectile. The weapon is reused for its FIRE PATTERN; what
+   * leaves the barrel is the slow, magenta, dodgeable hostile round with its own damage and
+   * penetration level (see projectiles.ts::enemyRound). That split is also what keeps enemy fire
+   * readable in a crowded fight — an amber SMG tracer would be indistinguishable from the player's.
+   */
+  private spawnEnemyRound(e: Enemy, dir: Vec2, w: RangedWeaponDef): void {
+    const muzzle = add(e.pos, scale(dir, e.r + w.muzzleOffset));
+    const base = Math.atan2(dir.y, dir.x);
+    for (let i = 0; i < w.pellets; i++) {
+      const a = base + (Math.random() * 2 - 1) * w.spread;
+      this.bullets.push({
+        pos: muzzle,
+        vel: scale(v2(Math.cos(a), Math.sin(a)), CONFIG.gunnerBulletSpeed),
+        r: CONFIG.gunnerBulletR,
+        life: CONFIG.gunnerBulletLife,
+        damage: CONFIG.gunnerDamage,
+        // The round's penetration level travels with the projectile (single source: the def), so the
+        // player's plate resolves against exactly the ammo the gunner is firing.
+        level: PROJECTILES.enemyRound.level,
+        fromPlayer: false,
+        alive: true,
+        def: PROJECTILES.enemyRound,
+      });
+    }
     this.spawnBurst(muzzle, 4, '#ff5a8a');
     this.shake = Math.max(this.shake, 0.05);
   }

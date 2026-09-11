@@ -693,6 +693,128 @@ const LAT_TOL = 0.01;   // world units; the theoretical wedge bound is 2*eps*QUE
   }
 }
 
+// ------------------------------------------- the aim assist is a 15-degree nudge, firing only
+//
+// 「给开火加个自动瞄准，但是只瞄准当前摄像机朝向 15° 范围内，停火后回正」. Three rules, and each one
+// is a different way to get it wrong:
+//   * the cone is measured from the CAMERA direction and re-measured every frame — measuring from the
+//     assisted direction would let it ratchet onto a target frame by frame;
+//   * the assist only runs WHILE FIRING, and releasing must put the facing back on the camera
+//     (「回正」) with no state to unwind;
+//   * it is a nudge, not a lock-on: a target outside the cone must be ignored even when it is the
+//     closest thing on screen, and the visibility filter still applies inside the cone.
+{
+  const { GameSim } = await import(GAME.href);
+  const openSim = () => {
+    const sim = new GameSim();
+    sim.spawnQueue = 0;
+    sim.spawnTimer = 0;
+    sim.enemies = [];
+    sim.obstacles = [];            // no cover here: these assertions are about ANGLES
+    sim.equipWeapon('smg');
+    return sim;
+  };
+  const foe = (sim, dist, thetaDeg, hp = 1e9) => {
+    const t = (thetaDeg * Math.PI) / 180;
+    sim.enemies.push({
+      id: 900 + sim.enemies.length, pos: { x: dist * Math.cos(t), y: dist * Math.sin(t) },
+      vel: { x: 0, y: 0 }, r: 0.7, hp, maxHp: hp, alive: true, kind: 'chaser', speed: 0,
+      touchDmg: 0, hitFlash: 0, touchCd: 0, burns: [], flameAcc: 0, fireT: 0, aiming: false,
+    });
+  };
+  const FWD = { x: 1, y: 0 };      // the camera looks along +X (yaw 0 -> screen up is -Z, but any
+                                   // unit vector works here: the cone is relative to it)
+  const step = (sim, firing) =>
+    sim.update(DT, { move: { x: 0, y: 0 }, aim: FWD, firing, autoAim: true });
+  const facingDeg = (sim) => (sim.player.aimAngle * 180) / Math.PI;
+
+  check('assist: the cone constant is the requested 15 degrees',
+    CONFIG.autoAimConeDeg === 15, String(CONFIG.autoAimConeDeg));
+
+  // (1) inside the cone, while firing: the facing snaps to the target (not merely "stays forward")
+  {
+    const sim = openSim();
+    foe(sim, 15, 10);
+    step(sim, true);
+    check('assist: an enemy 10° off the camera IS locked while firing',
+      Math.abs(facingDeg(sim) - 10) < 1e-9, String(facingDeg(sim)));
+  }
+  // (2) just inside vs just outside the boundary
+  {
+    const inside = openSim();
+    foe(inside, 15, 14);
+    step(inside, true);
+    const outside = openSim();
+    foe(outside, 15, 15.5);
+    step(outside, true);
+    check('assist: 14° locks, 15.5° does not (the boundary is the cone, not a rounded guess)',
+      Math.abs(facingDeg(inside) - 14) < 1e-9 && Math.abs(facingDeg(outside)) < 1e-9,
+      `${facingDeg(inside)} / ${facingDeg(outside)}`);
+  }
+  {
+    const sim = openSim();
+    foe(sim, 15, 20);
+    step(sim, true);
+    check('assist: a target 20° off is ignored — the player still aims the camera', 
+      Math.abs(facingDeg(sim)) < 1e-9, String(facingDeg(sim)));
+  }
+  // (3) "nearest" means nearest INSIDE the cone: a closer enemy outside must not steal the lock
+  {
+    const sim = openSim();
+    foe(sim, 5, 25);               // closest, but out of the cone
+    foe(sim, 15, 5);               // farther, but in front
+    step(sim, true);
+    check('assist: the nearer enemy OUTSIDE the cone does not beat the one inside it',
+      Math.abs(facingDeg(sim) - 5) < 1e-9, String(facingDeg(sim)));
+  }
+  // (4) 回正: releasing the trigger drops the override, with no extra state
+  {
+    const sim = openSim();
+    foe(sim, 15, 10);
+    step(sim, true);
+    const locked = facingDeg(sim);
+    step(sim, false);
+    check('assist: releasing the trigger returns the facing to the camera direction',
+      Math.abs(locked - 10) < 1e-9 && Math.abs(facingDeg(sim)) < 1e-9,
+      `locked=${locked} released=${facingDeg(sim)}`);
+    check('assist: …and it stays released while the trigger is up',
+      (() => { for (let i = 0; i < 30; i++) step(sim, false); return Math.abs(facingDeg(sim)) < 1e-9; })(),
+      String(facingDeg(sim)));
+  }
+  // (5) ANTI-RATCHET: the cone is the CAMERA's, so a target just outside can never creep in.
+  // This is the assertion that fails if the reference is fed last frame's assisted direction.
+  {
+    const sim = openSim();
+    foe(sim, 15, 28);              // outside, and would be inside a cone centred on an assisted 14°
+    for (let i = 0; i < 120; i++) step(sim, true);
+    check('assist: a target outside the cone never ratchets in, even held for 2s',
+      Math.abs(facingDeg(sim)) < 1e-9, String(facingDeg(sim)));
+  }
+  // (6) visibility still applies INSIDE the cone (the assist is not a wallhack)
+  {
+    const sim = new GameSim();
+    sim.spawnQueue = 0;
+    sim.spawnTimer = 0;
+    sim.enemies = [];
+    sim.obstacles = [{ x: 6, y: 0, hw: 1, hh: 6, h: 2.5 }];
+    sim.equipWeapon('smg');
+    foe(sim, 15, 0);               // dead ahead, but behind the wall
+    step(sim, true);
+    check('assist: an enemy inside the cone but behind cover is NOT locked',
+      Math.abs(facingDeg(sim)) < 1e-9, String(facingDeg(sim)));
+  }
+  // (7) and the assist actually steers the bullets, not just the sprite
+  {
+    const sim = openSim();
+    foe(sim, 15, 10);
+    step(sim, true);
+    const b = sim.bullets.find((x) => !x.fromPlayer && x.alive) ?? sim.bullets[0];
+    const bulletDeg = (Math.atan2(b.vel.y, b.vel.x) * 180) / Math.PI;
+    check('assist: rounds leave along the assisted direction (within the weapon spread)',
+      Math.abs(bulletDeg - 10) <= 6.5, `${bulletDeg.toFixed(2)}° vs 10° ± 6° spread`);
+  }
+}
+
 // ------------------------------------------------------------- cover dimming rule
 {
   // The LONGEST wall in the layout, whatever it currently measures: pinning the old 1 x 7 numbers

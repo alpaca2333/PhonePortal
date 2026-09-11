@@ -1,0 +1,219 @@
+/**
+ * Settings schema for the FBX→GLB converter — PURE data + pure functions (no DOM, no fetch), so the
+ * merge/validate/clamp rules are testable in Node (scripts/verify-fbx2glb.mjs), exactly like the
+ * shooter's `settings.ts`.
+ *
+ * The server stores an opaque JSON object per scope; THIS module owns the schema. Stored values are
+ * SPARSE OVERRIDES: an untouched key is absent and keeps the built-in default, and unknown keys are
+ * preserved verbatim on save (AGENTS.md「设置与用户数据」).
+ *
+ * Two groups, scope `fbx2glb`:
+ *   - `convert` → 转换选项: output format, merge, animations, unit scale, clip naming
+ *   - `preview` → 预览: grid, bone display, playback speed
+ *
+ * ⚠️ THE `<orientation>` LEVEL IS PRESENT BUT HAS NO SEMANTICS HERE — and that is deliberate, so it
+ * needs its reason on the record. AGENTS.md mandates the key path `scope.<组>.<方向>.<键>` because the
+ * shooter's layout values genuinely differ per orientation. A converter has no such values: the
+ * export format or the unit scale must NOT change when the phone is rotated, and storing them per
+ * orientation would make 「转屏后导出格式变了」 a real bug. The resolution used here is to keep the
+ * mandated path (so every app's storage shape stays uniform and the panel's merge path has no special
+ * case) while having the panel WRITE BOTH orientations on every change — the two copies therefore
+ * cannot diverge through the UI, and a hand-edited file with only one copy still reads
+ * deterministically (the current orientation wins, the other falls back to the defaults).
+ */
+
+import { SCALE_MODES, type ScaleMode } from './units.js';
+
+export type Orientation = 'portrait' | 'landscape';
+export const ORIENTATIONS: readonly Orientation[] = ['portrait', 'landscape'];
+
+export interface Viewport { width: number; height: number; }
+
+/** Which copy of a setting the current viewport reads (see the note above). */
+export function orientationOf(vp: Viewport): Orientation {
+  return vp.width > vp.height ? 'landscape' : 'portrait';
+}
+
+/** The whole scope value as stored on the server. */
+export type RawSettings = Record<string, unknown>;
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/** Accept whatever the server holds (or a hand-edited file) and return a safe raw object. */
+export function createState(raw: unknown): RawSettings {
+  return isPlainObject(raw) ? raw : {};
+}
+
+// ---------------------------------------------------------------------------
+// convert group
+// ---------------------------------------------------------------------------
+
+export const FORMATS = ['glb', 'gltf'] as const;
+export type ExportFormat = (typeof FORMATS)[number];
+export const CLIP_NAME_MODES = ['file', 'clip'] as const;
+export type ClipNameMode = (typeof CLIP_NAME_MODES)[number];
+
+export interface ConvertSettings {
+  /** `glb` = one self-contained binary (default); `gltf` = JSON with an embedded base64 buffer. */
+  format: ExportFormat;
+  /** Merge every input file into one output (default); off = one output per input file. */
+  merge: boolean;
+  /** Export animation clips at all. Off produces a static model. */
+  animations: boolean;
+  /** Unit handling (see units.ts): auto / keep / cm→m. */
+  scaleMode: ScaleMode;
+  /** Clip naming: after the FILE (default) or after the clip's own name (see names.ts). */
+  clipNaming: ClipNameMode;
+}
+
+export const CONVERT_GROUP = 'convert';
+export const CONVERT_KEYS = ['format', 'merge', 'animations', 'scaleMode', 'clipNaming'] as const;
+export type ConvertKey = (typeof CONVERT_KEYS)[number];
+
+/**
+ * Built-in defaults. `glb` + merge + animations reproduces the one workflow this app exists for
+ * (Mixamo: one file per animation → one GLB with all clips), so an untouched install needs no clicks.
+ */
+export function convertDefaults(): ConvertSettings {
+  return { format: 'glb', merge: true, animations: true, scaleMode: 'auto', clipNaming: 'file' };
+}
+
+/** One raw value → a valid setting, or undefined when it is not usable (dirty data is dropped, not thrown). */
+function validConvertValue(key: ConvertKey, value: unknown): string | boolean | undefined {
+  switch (key) {
+    case 'format':
+      return typeof value === 'string' && (FORMATS as readonly string[]).includes(value)
+        ? (value as ExportFormat) : undefined;
+    case 'scaleMode':
+      return typeof value === 'string' && (SCALE_MODES as readonly string[]).includes(value)
+        ? (value as ScaleMode) : undefined;
+    case 'clipNaming':
+      return typeof value === 'string' && (CLIP_NAME_MODES as readonly string[]).includes(value)
+        ? (value as ClipNameMode) : undefined;
+    case 'merge':
+    case 'animations':
+      return typeof value === 'boolean' ? value : undefined;
+    default:
+      return undefined;
+  }
+}
+
+/** Sparse convert overrides for one orientation; unusable values are ignored, not clamped. */
+export function readConvertOverrides(raw: RawSettings, o: Orientation): Partial<ConvertSettings> {
+  const group = raw[CONVERT_GROUP];
+  if (!isPlainObject(group)) return {};
+  const src = group[o];
+  if (!isPlainObject(src)) return {};
+  const out: Partial<ConvertSettings> = {};
+  for (const k of CONVERT_KEYS) {
+    const v = validConvertValue(k, src[k]);
+    if (v !== undefined) (out as Record<string, unknown>)[k] = v;
+  }
+  return out;
+}
+
+/**
+ * Set one convert override. WRITES BOTH ORIENTATIONS — see the header note: these values are not
+ * orientation-dependent, and writing both is what keeps the mandated storage path from changing the
+ * app's behaviour on rotation.
+ */
+export function writeConvertOverride(raw: RawSettings, key: ConvertKey, value: unknown): void {
+  if (!isPlainObject(raw[CONVERT_GROUP])) raw[CONVERT_GROUP] = {};
+  const group = raw[CONVERT_GROUP] as Record<string, unknown>;
+  for (const o of ORIENTATIONS) {
+    if (!isPlainObject(group[o])) group[o] = {};
+    (group[o] as Record<string, unknown>)[key] = value;
+  }
+}
+
+/** Drop every convert override (「恢复默认」), for both orientations, cleaning up empty containers. */
+export function clearConvertGroup(raw: RawSettings): void {
+  delete raw[CONVERT_GROUP];
+}
+
+/** Defaults merged with the sparse overrides of the current orientation. */
+export function effectiveConvert(raw: RawSettings, o: Orientation): ConvertSettings {
+  return { ...convertDefaults(), ...readConvertOverrides(raw, o) };
+}
+
+/** Is any convert value overridden in EITHER orientation? (drives 「恢复默认」's enabled state) */
+export function hasConvertOverrides(raw: RawSettings): boolean {
+  return ORIENTATIONS.some((o) => Object.keys(readConvertOverrides(raw, o)).length > 0);
+}
+
+// ---------------------------------------------------------------------------
+// preview group
+// ---------------------------------------------------------------------------
+
+export interface PreviewSettings {
+  /** Show the ground grid. */
+  grid: boolean;
+  /** Show the skeleton (three's SkeletonHelper). */
+  bones: boolean;
+  /** Playback rate of the previewed clip. */
+  speed: number;
+}
+
+export const PREVIEW_GROUP = 'preview';
+export const PREVIEW_KEYS = ['grid', 'bones', 'speed'] as const;
+export type PreviewKey = (typeof PREVIEW_KEYS)[number];
+
+export const SPEED_MIN = 0.1;
+export const SPEED_MAX = 2;
+export const SPEED_STEP = 0.1;
+export const SPEED_DEFAULT = 1;
+
+/** Same defaults as the shooter's sliders: the shipped look, nothing pre-toggled off. */
+export function previewDefaults(): PreviewSettings {
+  return { grid: true, bones: false, speed: SPEED_DEFAULT };
+}
+
+/** Clamp + snap a playback speed onto the slider's step grid. */
+export function clampSpeed(v: number): number {
+  if (!Number.isFinite(v)) return SPEED_DEFAULT;
+  const clamped = v < SPEED_MIN ? SPEED_MIN : v > SPEED_MAX ? SPEED_MAX : v;
+  return Math.round(clamped / SPEED_STEP) * SPEED_STEP;
+}
+
+function validPreviewValue(key: PreviewKey, value: unknown): string | number | boolean | undefined {
+  if (key === 'speed') return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+export function readPreviewOverrides(raw: RawSettings, o: Orientation): Partial<PreviewSettings> {
+  const group = raw[PREVIEW_GROUP];
+  if (!isPlainObject(group)) return {};
+  const src = group[o];
+  if (!isPlainObject(src)) return {};
+  const out: Partial<PreviewSettings> = {};
+  for (const k of PREVIEW_KEYS) {
+    const v = validPreviewValue(k, src[k]);
+    if (v !== undefined) (out as Record<string, unknown>)[k] = v;
+  }
+  return out;
+}
+
+/** Set one preview override in BOTH orientations (same reasoning as writeConvertOverride). */
+export function writePreviewOverride(raw: RawSettings, key: PreviewKey, value: unknown): void {
+  if (!isPlainObject(raw[PREVIEW_GROUP])) raw[PREVIEW_GROUP] = {};
+  const group = raw[PREVIEW_GROUP] as Record<string, unknown>;
+  for (const o of ORIENTATIONS) {
+    if (!isPlainObject(group[o])) group[o] = {};
+    (group[o] as Record<string, unknown>)[key] = value;
+  }
+}
+
+export function clearPreviewGroup(raw: RawSettings): void {
+  delete raw[PREVIEW_GROUP];
+}
+
+/** Defaults merged with the sparse overrides, then clamped (speed snapped to the step grid). */
+export function effectivePreview(raw: RawSettings, o: Orientation): PreviewSettings {
+  const merged = { ...previewDefaults(), ...readPreviewOverrides(raw, o) };
+  return { grid: merged.grid, bones: merged.bones, speed: clampSpeed(merged.speed) };
+}
+
+export function hasPreviewOverrides(raw: RawSettings): boolean {
+  return ORIENTATIONS.some((o) => Object.keys(readPreviewOverrides(raw, o)).length > 0);
+}

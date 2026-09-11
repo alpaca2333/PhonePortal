@@ -36,7 +36,7 @@ portal/
 ├─ scripts/
 │  ├─ build.mjs            # 原子构建：tsc → dist.next/，再换入 dist/（失败不动 dist/）
 │  ├─ dev-serve.mjs        # 开发监督者（npm run dev）：构建 + 启动 + watch 源码 → 重建重启
-│  ├─ verify-stick.mjs     # 摇杆/相机/设置验证：几何不变量 + 默认值 + 钳制 + 稀疏覆盖
+│  ├─ verify-stick.mjs     # 摇杆/相机/设置验证：几何不变量 + 视角区（透明触摸区）yaw 映射 + 开火键位置 + 默认值 + 钳制 + 稀疏覆盖
 │  ├─ verify-panel.mjs     # 设置面板 DOM 接线验证（DOM shim，无浏览器）
 │  ├─ verify-burn.mjs      # 龙息弹燃烧 DoT + 火焰粒子验证（跳点/叠层/粒子/朝向）
 │  ├─ verify-ammo.mjs      # 弹夹/自动换弹 + 冲锋枪验证（时序/帧率无关/散布/三参数可配置）
@@ -48,6 +48,7 @@ portal/
 │  ├─ preview-model.mjs    # 离线模型预览：把 .glb 的四个正交视图（前/左/后/上）光栅化成 PNG，零依赖、无需浏览器/GPU（绑定姿势，用来挑模型）
 │  ├─ verify-diag.mjs      # 卡顿归因验证（`?diag=1`）：GC / shader 编译 / 资源解析 / 长任务 / 相位的判定规则与反向用例 + DOM shim 驱动真实读数面板
 │  ├─ lib/glb.mjs          # 共享 .glb 读取器（节点 TRS + 与加载器相同的居中），供上面两个脚本复用
+│  ├─ verify-fbx2glb.mjs   # FBX→GLB 子应用验证：真实 FBXLoader/GLTFExporter 跑真样例（解析/合并重定向/自包含/自检/缩放/命名规则/设置 schema/「不上传」源码级断言）
 │  └─ trace-shooter.mjs    # 射击子应用行为快照（重构前后 diff 必须为空）
 ├─ server/                 # 后端（Node + TS）
 │  └─ src/
@@ -67,6 +68,7 @@ portal/
    ├─ clock/               # ⏰ 时钟 + 秒表
    ├─ calculator/          # 🧮 计算器（内置表达式解析，无 eval）
    ├─ blackhole/           # 🕳️ 黑洞（Schwarzschild 光线追踪，WebGL2）
+   ├─ fbx2glb/             # 🧊 FBX → GLB 转换器（浏览器内转换，可把多个 Mixamo 动作合并成一个角色文件）
    └─ shooter/             # 🎯 射击竞技场（室内掩体射击 + 视野遮挡 + 背包/物品槽位 + 备弹 + 护甲穿透等级 1–6 + 主副武器切换 + 分组设置面板：操控/画面/视野/光照）
 ```
 
@@ -196,7 +198,9 @@ apps/<你的应用id>/
 - ⏰ **时钟**（`apps/clock`）：实时时钟 + 秒表。
 - 🧮 **计算器**（`apps/calculator`）：支持 `+ - × ÷ %`、括号解析的正确计算器，无需网络。
 - 🕳️ **黑洞**（`apps/blackhole`）：WebGL2 逐像素光线追踪，积分 Schwarzschild 光子测地线（已校验：捕获临界碰撞参数 ≈2.6rs），呈现真实引力透镜、吸积盘多普勒增亮/引力红移与光子环。
-- 🎯 **射击竞技场**（`apps/shooter`）：**76×76 室内掩体射击（PvE 枪战）**，俯视角双摇杆，Three.js（本地 vendor）+ glTF 骨骼动画 + 卡通渲染/角色描边。场景为 Kenney Furniture Kit 室内房间（CC0，49 个 `.glb` 仅 541KB），地上 **20 块掩体同时挡人、挡子弹、挡刀、挡火箭溅射**；敌人以**枪手为主**（开火前有瞄准预警线）+ 少量近战冲锋。**背包 / 武器 / 备弹 / 护甲穿透（1–6 级）**全部数据驱动（4 把武器：龙息喷 / 冲锋枪 / 火箭筒 / 砍刀），**视野遮挡与命中判定共用同一套视线函数**（能打到你的敌人一定看得见），模拟/渲染分离，设置分六组存服务器，`?diag=1` 打开内置卡顿剖析。声明了 `"orientation": "landscape"`。
+- 🧊 **FBX → GLB**（`apps/fbx2glb`）：**在浏览器里把 FBX 转成 glTF/GLB**（three r160 本地 vendor 的 `FBXLoader` + `GLTFExporter` + `GLTFLoader`），支持**把多个 Mixamo 动作文件合并成一个自带全部动作的角色文件**（自动挑出带蒙皮的角色本体、按骨骼名匹配重定向另一个批次的骨架、按文件名给动作命名并处理 Mixamo 那个每次都叫 `mixamo.com` 的占位 take 名、按实测高度自动做厘米→米缩放），导出后**用 `GLTFLoader` 重新读回来自检**，全程**不上传**（有源码级断言）；带 WebGL 预览（无 WebGL 时降级为说明文字）。设置两组存服务器。
+  - 完整设计决策（含「导出缩放为什么必须加在成品 JSON 上」「`Box3.setFromObject` 对 SkinnedMesh 会二次乘」两个真坑）、设置键名表、许可证见 **[`apps/fbx2glb/README.md`](apps/fbx2glb/README.md)**。
+- 🎯 **射击竞技场**（`apps/shooter`）：**76×76 室内掩体射击（PvE 枪战）**，俯视角三人称（**左摇杆移动 / 右下大面积透明「视角区」转视角 / 独立开火键，角色永远朝摄像机前方**），Three.js（本地 vendor）+ glTF 骨骼动画 + 卡通渲染/角色描边。场景为 Kenney Furniture Kit 室内房间（CC0，49 个 `.glb` 仅 541KB），地上 **20 块掩体同时挡人、挡子弹、挡刀、挡火箭溅射**；敌人以**枪手为主**（见面先瞄 `0.5s`、预警线亮起、然后**照着自己那把冲锋枪的配置打空一梭子再换弹**，武器的射速/弹夹/换弹/散布全部复用 `weapons.ts` 的同一张表）+ 少量近战冲锋。**背包 / 武器 / 备弹 / 护甲穿透（1–6 级）**全部数据驱动（4 把武器：龙息喷 / 冲锋枪 / 火箭筒 / 砍刀），**视野遮挡与命中判定共用同一套视线函数**（能打到你的敌人一定看得见），模拟/渲染分离，设置分六组存服务器，`?diag=1` 打开内置卡顿剖析。声明了 `"orientation": "landscape"`。
   - 完整设计决策、设置键名表、美术资源清单与踩坑记录见 **[`apps/shooter/README.md`](apps/shooter/README.md)**（本行只保留概览）。
 
 ---
@@ -220,6 +224,8 @@ apps/<你的应用id>/
 | 资源 | 位置 | 许可证 | 说明 |
 | --- | --- | --- | --- |
 | [Three.js](https://threejs.org) r160（`three.module.min.js` + `GLTFLoader` / `BufferGeometryUtils` / `SkeletonUtils`） | `apps/shooter/vendor/` | MIT | 本地 vendor，无 CDN 依赖；文件头保留 `@license` 声明 |
+| [Three.js](https://threejs.org) r160（`three.module.min.js` + `FBXLoader` / `GLTFExporter` / `GLTFLoader` / `OrbitControls` 等 addon） | `apps/fbx2glb/vendor/` | MIT | 与射击子应用的 vendor 是同版本（md5 相同，验证脚本会断言）；清单与获取方式见该目录 `README.md` |
+| `sample.fbx`（2 骨骼蒙皮盒子 + 两个 take 的 ASCII FBX 样例） | `apps/fbx2glb/assets/` | 本仓库自有 | 手写，无第三方素材；同时是验证脚本的输入 |
 | Quaternius「Cyberpunk Pack」人形 `cyber_human.glb` | `apps/shooter/assets/models/` | CC0 1.0 | 可商用、可再分发、无需署名 |
 | [Kenney](https://kenney.nl/assets/furniture-kit)「Furniture Kit」49 个室内道具 `.glb` | `apps/shooter/assets/props/` | CC0 1.0 | 完整来源 / 文件清单 / 再下载说明见同目录 `SOURCE.txt` |
 

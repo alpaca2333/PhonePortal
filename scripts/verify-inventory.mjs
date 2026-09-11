@@ -50,7 +50,9 @@ const { PROJECTILES, GRENADE_DAMAGE, GRENADE_RADIUS } = await import(PROJ.href);
 const { actionButtonReadout, armorReadout } = await import(HUD.href);
 const {
   ARMOR_BAR_CLEARANCE, ARMOR_BAR_H, ARMOR_BAR_Y, BAR_FRAME_GAP, BAR_H, BAR_PAD, BAR_Y,
-  MAX_BAR_SLOTS, MAX_ENEMY_BARS, barFrameBottom, barFrameHeight, barFrameTop, createBarAllocator,
+  PLAYER_ARMOR_BAR_Y, PLAYER_ARMOR_CLEARANCE, PLAYER_BAR_W, PLAYER_BAR_Y, PLAYER_RELOAD_BAR_Y,
+  PLAYER_RELOAD_CLEARANCE, MAX_BAR_SLOTS, MAX_ENEMY_BARS, barFrameBottom, barFrameHeight,
+  barFrameTop, createBarAllocator,
 } = await import(HUD.href);
 
 let passed = 0;
@@ -823,15 +825,31 @@ function run(sim, seconds, input = idle, dt = DT) {
     const zero = createBarAllocator(0);
     check('分配器：容量为 0 时直接拒绝（frame/fill 保持 -1）',
       zero.next() === false && zero.frame === -1 && zero.fill === -1);
-    check('条位容量 >= 每个敌人两条 + 换弹条（所有敌人都带甲也不越界）',
-      MAX_BAR_SLOTS >= MAX_ENEMY_BARS * 2 + 1, `${MAX_BAR_SLOTS} vs ${MAX_ENEMY_BARS * 2 + 1}`);
-    // simulate the render loop at worst case: 128 armoured enemies + the player's reload bar
+    check('条位容量 >= 每个敌人两条 + 玩家三条（血/甲/换弹，所有敌人都带甲也不越界）',
+      MAX_BAR_SLOTS >= MAX_ENEMY_BARS * 2 + 3, `${MAX_BAR_SLOTS} vs ${MAX_ENEMY_BARS * 2 + 3}`);
+    // simulate the render loop at worst case: 128 armoured enemies + the player's THREE strips
     const full = createBarAllocator(MAX_BAR_SLOTS);
     let used = 0;
     for (let i = 0; i < MAX_ENEMY_BARS; i++) { if (full.next()) used++; if (full.next()) used++; }
-    if (full.next()) used++;
-    check('满场（128 个带甲敌人 + 换弹条）恰好用满 257 个槽位且不溢出',
+    for (let i = 0; i < 3; i++) if (full.next()) used++;
+    check('满场（128 个带甲敌人 + 玩家血/甲/换弹条）恰好用满 259 个槽位且不溢出',
       used === MAX_BAR_SLOTS && full.next() === false, `${used} / ${MAX_BAR_SLOTS}`);
+
+    // The PLAYER's head bars: same "frames must not touch" rule as the enemy pair, applied to the
+    // health/armour/reload stack, and the width channel that says "this bar is mine".
+    check('玩家血条与护甲条不重叠（按 frame 边算，不是填充边）',
+      PLAYER_ARMOR_CLEARANCE >= BAR_FRAME_GAP - 1e-9, String(PLAYER_ARMOR_CLEARANCE));
+    check('玩家护甲条与换弹条不重叠（换弹条在护甲条之上，不是血条之上）',
+      PLAYER_RELOAD_CLEARANCE >= BAR_FRAME_GAP - 1e-9, String(PLAYER_RELOAD_CLEARANCE));
+    check('玩家三条从上到下的顺序：换弹 > 护甲 > 血',
+      PLAYER_RELOAD_BAR_Y > PLAYER_ARMOR_BAR_Y && PLAYER_ARMOR_BAR_Y > PLAYER_BAR_Y,
+      `${PLAYER_RELOAD_BAR_Y} / ${PLAYER_ARMOR_BAR_Y} / ${PLAYER_BAR_Y}`);
+    check('玩家血条比敌人血条长（唯一的"这条是我的"通道）',
+      PLAYER_BAR_W > 1.15, `${PLAYER_BAR_W} vs 1.15`);
+    check('玩家血条抬得比敌人血条高一点（并排站时不至于糊在一起）',
+      PLAYER_BAR_Y > BAR_Y, `${PLAYER_BAR_Y} vs ${BAR_Y}`);
+    check('玩家护甲条与敌人护甲条共用高度（同一种视觉语言）',
+      barFrameHeight(ARMOR_BAR_H) > ARMOR_BAR_H);
   }
 }
 

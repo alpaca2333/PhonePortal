@@ -31,6 +31,20 @@ export const CONFIG = {
   // Cooldown used when an attack could not happen (ranged weapon with no aim direction):
   // retry almost immediately instead of stalling for the full weapon cooldown.
   noAimRetry: 0.02,
+  // ---------------------------------------------------------------------------------------
+  // AIM ASSIST (「开火加个自动瞄准，但只瞄准当前摄像机朝向 15° 范围内，停火后回正」)
+  //
+  // While the trigger is held, the nearest VISIBLE enemy within this half-angle of the CAMERA's
+  // forward direction is aimed at instead of straight ahead; releasing the trigger drops the override
+  // and the facing returns to the camera direction on the next frame (the 「回正」 half of the request).
+  //
+  // 15 DEGREES IS A NUDGE, NOT A LOCK-ON. The player still has to put the camera roughly on target —
+  // the assist only forgives a thumb that is a little off, which is the whole point of a touch
+  // control with no crosshair. Raising it toward 45 would start to feel like the game aims for you;
+  // 0 disables the assist entirely without touching any code path (the cone is then degenerate).
+  // The cone is measured from the CAMERA direction every frame, never from last frame's assisted
+  // direction — see the note in game.ts, that is what stops it ratcheting onto a target.
+  autoAimConeDeg: 15,
   contactInvuln: 0.6,   // player i-frames after taking a hit
   hitFlashTime: 0.1,    // seconds an enemy's surface stays red after a hit (fades to normal)
   baseEnemyHp: 100,
@@ -168,24 +182,33 @@ export const CONFIG = {
   meleeImpactSpeed: 13,    // ring launch speed (u/s)
   meleeImpactDrag: 7,      // ring damping; 13/7 ≈ 1.9 units of travel, so it hugs the victim
   // ---------------------------------------------------------------------------------------
-  // Gunner: the PvE cover-shooter enemy. Armed like the player, but with LOW aggression — it holds
-  // position, telegraphs, and fires slowly. Numbers here are the difficulty dial; the behaviour
-  // (stop at range, stand still when line of sight is blocked) lives in game.ts::updateEnemies.
+  // Gunner: the PvE cover-shooter enemy. Armed like the player — LITERALLY: it shoots a weapon from
+  // the same `weapons.ts` table (`gunnerWeapon`), so its cadence, magazine size, reload time, spread,
+  // pellet count and muzzle offset are the WEAPON's numbers and are deliberately not repeated here.
+  // What this block owns is everything that is NOT the weapon: where it stands and how far it sees
+  // (behaviour in game.ts::updateGunner) plus how hard a HOSTILE round hits.
   //
-  // HOW INCOMING DPS IS CAPPED: a hit sets `player.invuln = contactInvuln` (0.6s), and enemy rounds
-  // respect the SAME timer, so no number of gunners can deal damage faster than damage/0.6 per
-  // second. That is the real safety valve here — it is why several gunners can shoot at once without
-  // melting the player, and why there is no separate "max simultaneous shooters" throttle.
+  // AGGRESSION (this round's request 「见面之后瞄准 0.5s 然后持续开枪一梭子」): the trigger is
+  //   engage -> TELEGRAPH (gunnerAimTime) -> BURST (the weapon's cadence until the magazine is empty)
+  //          -> RELOAD (the weapon's reloadTime) -> telegraph again.
+  // With the SMG that is 0.5s of warning, ~2.3s of continuous fire (30 rounds at 13/s), 1.5s of
+  // reload, repeat. Retuning the SMG retunes every gunner; there is no second copy of those numbers.
+  //
+  // HOW INCOMING DPS IS CAPPED (unchanged, and now the thing that makes a whole magazine safe to
+  // ship): a hit sets `player.invuln = contactInvuln` (0.6s), and enemy rounds respect the SAME
+  // timer, so no number of gunners and no fire rate can exceed damage/0.6 per second. A burst
+  // therefore raises PRESSURE (there is no 3s gap to stroll through) and pushes REALISED damage up
+  // towards that ceiling, but it does not move the ceiling itself — which is why this change needed
+  // no new damage number and no "max simultaneous shooters" throttle.
   // ---------------------------------------------------------------------------------------
   gunnerHp: 90,            // slightly squishier than a chaser, since it shoots back
   gunnerSpeed: 3.2,        // slow: this is repositioning, not charging
   gunnerRange: 12,         // stops walking in at this distance (matches the cover ring in level.ts)
   gunnerRangeSlack: 3,     // hysteresis band, so it does not stutter on the boundary
   gunnerSight: 34,         // beyond this it holds fire entirely (it is not a sniper)
-  gunnerAimTime: 0.7,      // telegraph before the first shot — the player's window to take cover
-  gunnerFireCd: 3.0,       // LOW aggression: one shot every 3s, on top of the aim telegraph
+  gunnerAimTime: 0.5,      // telegraph before the FIRST round of a burst — the window to take cover
+  gunnerWeapon: 'smg',     // which weapon it shoots (weapons.ts); re-used wholesale, see above
   gunnerDamage: 6,         // 100 HP / 6 = 17 hits; with i-frames that is ~10s in the open under fire
-  gunnerSpread: 0.09,      // HALF-angle (radians, ~5°) — deliberately imperfect
   gunnerBulletSpeed: 34,   // slow and visible, so rounds can actually be dodged and read
   gunnerBulletLife: 2.5,   // 85 units, longer than the ~77-unit worst-case flight (see ARENA_HALF)
   gunnerBulletR: 0.18,

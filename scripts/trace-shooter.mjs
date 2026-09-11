@@ -1,7 +1,7 @@
 /**
  * Deterministic behavior trace for apps/shooter (used to prove a refactor changed nothing).
  *
- * Seeds Math.random with a fixed PRNG, runs three scripted scenarios against the BUILT sim
+ * Seeds Math.random with a fixed PRNG, runs five scripted scenarios against the BUILT sim
  * (dist/apps/shooter/src/game.js), and prints one line per simulated frame. Because every
  * random draw is consumed in code order, two builds with identical behavior produce a
  * byte-identical trace — so a refactor can be checked with plain diff:
@@ -31,6 +31,13 @@
  * SIMULATION was not touched. The player-vision feature (apps/shooter/src/vision.ts: occlusion hiding + the
  * darkness overlay) is a pure render-layer filter built on the sim's own `lineBlocked`, and it was
  * verified exactly that way — an empty diff against the previous baseline.
+ *
+ * SCENARIO E (the aim assist) was added for the opposite reason: a SIM gameplay change that the
+ * existing scenarios could not see, because B and C pass `autoAim: true` with a ZERO aim direction
+ * and therefore take the legacy "nearest visible, no cone" branch. E supplies a real camera direction
+ * (what the live input always does) and alternates firing/released, so the cone, the firing gate and
+ * the 「停火后回正」 release all have a fingerprint. Adding it left the first 2100 lines (A-D)
+ * byte-identical — which is itself the proof that the assist changed nothing else.
  *
  * Build first: this imports from dist/, not from the TypeScript sources.
  */
@@ -206,5 +213,45 @@ function addEnemy(sim, x, y, hp, kind, speed) {
     sim.update(1 / 60, input);
     sim.spawnQueue = 0;
     console.log('D ' + line(sim, i));
+  }
+}
+
+// --- scenario E: the AIM ASSIST (cone + release), so the new targeting rule is inside the
+// fingerprint instead of only being covered by verify-vision's assertions.
+// WHY IT IS A SEPARATE SCENARIO: B and C also pass `autoAim: true`, but with a ZERO aim direction —
+// that takes the historical "nearest visible, no cone" branch, so they would stay byte-identical even
+// if the assist broke completely. This one supplies a real camera direction (which is what the live
+// input always does), so a regression in the cone, in the firing gate or in the 「回正」 release has
+// nowhere to hide.
+{
+  const sim = new GameSim();
+  sim.obstacles = [];                  // angles, not cover: the visibility half is scenario B/C's job
+  sim.equipWeapon('smg');
+  sim.addAmmo('ammo9mm', 600);
+  sim.spawnQueue = 0;
+  sim.spawnTimer = 0;
+  sim.enemies = [];
+  // Two immortals at the SAME distance, 10° and 25° off the camera's +X forward. 10° is inside the
+  // 15° cone (so the facing snaps to it), 25° is outside (so it must be ignored no matter how long
+  // the trigger is held — that is the anti-ratchet property).
+  const R = 15;
+  const at = (deg) => [R * Math.cos((deg * Math.PI) / 180), R * Math.sin((deg * Math.PI) / 180)];
+  const [x1, y1] = at(10);
+  const [x2, y2] = at(25);
+  addEnemy(sim, x1, y1, 1000000000, 'chaser', 0);
+  addEnemy(sim, x2, y2, 1000000000, 'chaser', 0);
+  const FRAMES = 600;                  // 10s: four 150-frame cycles
+  for (let i = 0; i < FRAMES; i++) {
+    const input = {
+      move: { x: 0, y: 0 },
+      aim: { x: 1, y: 0 },             // the camera looks along +X (what input.ts reports live)
+      // 100 frames firing (locked on the 10° enemy) then 50 released (facing back at +X = 「回正」),
+      // so BOTH halves of the rule are in the fingerprint.
+      firing: i % 150 < 100,
+      autoAim: true,
+    };
+    sim.update(1 / 60, input);
+    sim.spawnQueue = 0;
+    console.log('E ' + line(sim, i));
   }
 }

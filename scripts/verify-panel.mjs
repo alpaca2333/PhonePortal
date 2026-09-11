@@ -36,6 +36,11 @@ function mkEl(tag) {
     className: '', textContent: '', type: '', title: '', hidden: false, disabled: false,
     dataset: {}, children: [], listeners: {},
     style: { props: {}, setProperty(k, v) { this.props[k] = v; } },
+    // `rect` is mutable so a test can PLACE the element: the fire-button drag reads it to preserve
+    // the grab offset (the button must not jump under the finger), and the panel turns the pointer
+    // position into right/bottom insets.
+    rect: { left: 0, top: 0, width: 0, height: 0 },
+    getBoundingClientRect() { return this.rect; },
     setAttribute(k, v) { this[k] = v; },
     classList: {
       set: new Set(),
@@ -44,6 +49,11 @@ function mkEl(tag) {
     },
     append(...kids) { for (const k of kids) this.children.push(k); },
     addEventListener(ev, fn) { (this.listeners[ev] ??= []).push(fn); },
+    // The joystick reads `.knob` (absent on the look pad — that is the point) and captures the
+    // pointer. Both are no-ops here, but they have to EXIST or `Input` cannot be constructed.
+    querySelector() { return null; },
+    setPointerCapture() {},
+    releasePointerCapture() {},
     // `extra` lets a test pass a fake event payload (code/key/stopPropagation/...)
     dispatch(ev, extra) { for (const fn of this.listeners[ev] ?? []) fn({ target: this, ...extra }); },
   };
@@ -55,7 +65,16 @@ globalThis.document = {
   createElement: mkEl,
   // only 'stage' is looked up by the panel; anything else gets a throwaway stub
   getElementById: (id) => (id === 'stage' ? stage : mkEl('div')),
-  documentElement: { style: { props: {}, setProperty(k, v) { this.props[k] = v; } } },
+  documentElement: {
+    style: { props: {}, setProperty(k, v) { this.props[k] = v; } },
+    // `<html>` carries the `settings-open` flag (the look pad's visibility), so it needs a classList
+    // of its own — the layout CSS variables live on the same element.
+    classList: {
+      set: new Set(),
+      toggle(c, on) { on ? this.set.add(c) : this.set.delete(c); },
+      contains(c) { return this.set.has(c); },
+    },
+  },
 };
 globalThis.window = {
   innerWidth: 800, innerHeight: 400,           // landscape viewport
@@ -96,20 +115,28 @@ function check(name, ok, detail) {
 
 const cameraPushes = [];
 const yawPushes = [];
+const yawScalePushes = [];
 const visionPushes = [];
 const lightPushes = [];
 const dirPushes = [];
 const fogPushes = [];
 const lookPushes = [];
+// The FIRE button element the panel drags while it is open. Placed at the bottom-right so the
+// expected insets are unambiguous (viewport is 800x400 in the shim).
+const fireEl = mkEl('button');
+fireEl.className = 'fire-btn';
+fireEl.rect = { left: 700, top: 300, width: 84, height: 84 };
 createSettingsPanel({
   onOpenChange: () => {},
   onCameraChange: (s) => cameraPushes.push(s),
   onCameraYawChange: (y) => yawPushes.push(y),
+  onYawScaleChange: (deg) => yawScalePushes.push(deg),
   onVisionChange: (dim) => visionPushes.push(dim),
   onLightChange: (scale) => lightPushes.push(scale),
   onDirectionalChange: (scale) => dirPushes.push(scale),
   onFogChange: (density) => fogPushes.push(density),
   onLookChange: (look) => lookPushes.push(look),
+  fireButton: fireEl,
 });
 await new Promise((r) => setTimeout(r, 30));   // let the boot loadSettings() settle
 
@@ -152,9 +179,9 @@ check('six group headers in order (操控, 画面, 视野, 光照, 雾, 后期)'
   && groups[3].children[0].textContent === '光照' && groups[4].children[0].textContent === '雾'
   && groups[5].children[0].textContent === '后期',
   groups.map((g) => g.children[0]?.textContent).join(','));
-check('fourteen slider rows (5 stick + camera height + camera yaw + vision + 2 light + fog + tone + '
-  + 'vignette + pixel)', rows.length === 14, String(rows.length));
-check('fourteen range inputs', ranges.length === 14, String(ranges.length));
+check('fifteen slider rows (5 stick + camera sensitivity + camera height + camera yaw + vision + '
+  + '2 light + fog + tone + vignette + pixel)', rows.length === 15, String(rows.length));
+check('fifteen range inputs', ranges.length === 15, String(ranges.length));
 check('one 恢复默认 button per group', resets.length === 6);
 check('camera slider limits = 0.4 / 3 / 0.05',
   camRange.min === '0.4' && camRange.max === '3' && camRange.step === '0.05',
@@ -171,6 +198,26 @@ check('yaw slider thumb reflects the server override (-45) and the readout is a 
   `${yawRange.value} / ${yawOut && yawOut.textContent}`);
 check('boot pushes the yaw default (0) first, then the server value',
   yawPushes[0] === 0 && yawPushes.includes(-45), JSON.stringify(yawPushes));
+
+// 摄像机灵敏度 (the right-stick yaw scale): a 操控-page slider whose range comes from camera.ts.
+const yawScaleRange = ranges.find((r) => r.dataset.key === 'yawScaleDeg');
+const yawScaleRow = rows.find((r) => r.children[1] === yawScaleRange);
+const yawScaleOut = yawScaleRow && yawScaleRow.children[2];
+check('camera sensitivity slider exists and lives on the 操控 page',
+  !!yawScaleRange && !!yawScaleRow, JSON.stringify(ranges.map((r) => r.dataset.key)));
+check('camera sensitivity limits = 20 / 180 / 5',
+  yawScaleRange.min === '20' && yawScaleRange.max === '180' && yawScaleRange.step === '5',
+  `${yawScaleRange.min}/${yawScaleRange.max}/${yawScaleRange.step}`);
+check('camera sensitivity defaults to 90 deg and reads out in degrees',
+  yawScaleRange.value === '90' && yawScaleOut.textContent === '90°',
+  `${yawScaleRange.value} / ${yawScaleOut && yawScaleOut.textContent}`);
+check('boot pushes the sensitivity (90) to the input layer',
+  yawScalePushes.length > 0 && yawScalePushes.every((v) => v === 90), JSON.stringify(yawScalePushes));
+yawScaleRange.value = '150';
+yawScaleRange.dispatch('input');
+check('dragging the sensitivity applies immediately and re-reads as degrees',
+  yawScalePushes.at(-1) === 150 && yawScaleOut.textContent === '150°',
+  `${yawScalePushes.at(-1)} / ${yawScaleOut.textContent}`);
 check('vision slider limits = 0 / 0.85 / 0.05',
   visRange.min === '0' && visRange.max === '0.85' && visRange.step === '0.05',
   `${visRange.min}/${visRange.max}/${visRange.step}`);
@@ -223,12 +270,56 @@ check('stick CSS variables written (size + 4 insets)',
   ['--stick-size', '--stick-lx', '--stick-ly', '--stick-rx', '--stick-ry'].every((k) => k in stickVars),
   JSON.stringify(stickVars));
 check('server stick override applied (56px)', stickVars['--stick-size'] === '56px', stickVars['--stick-size']);
+check('fire button CSS variables written (right/bottom insets from the 操控 layout)',
+  '--fire-rx' in stickVars && '--fire-ry' in stickVars, JSON.stringify(stickVars));
+check('the fire default tracks the overridden stick size (56px -> fireY = 8+56+14)',
+  stickVars['--fire-rx'] === '8px' && stickVars['--fire-ry'] === '78px',
+  `${stickVars['--fire-rx']} / ${stickVars['--fire-ry']}`);
+
+// The right stick is a LOOK PAD: its size comes from the VIEWPORT, not from `sizePx` (which is 56px
+// here via the server override) — that is the whole point of it being a big rectangle.
+check('look pad CSS variables are written from the viewport, not from sizePx',
+  stickVars['--look-w'] === '368px' && stickVars['--look-h'] === '168px',
+  `${stickVars['--look-w']} / ${stickVars['--look-h']} (viewport 800x400, sizePx 56)`);
+check('the look pad is much larger than the stick diameter it replaced',
+  parseFloat(stickVars['--look-w']) > 56 && parseFloat(stickVars['--look-h']) > 56,
+  `${stickVars['--look-w']}x${stickVars['--look-h']} vs 56px`);
+
+// --- fire button placement: open the panel, then drag the REAL button ------------------------
+// The requirement is "drag the button itself", so this drives the element the panel was handed.
+// The shim's viewport is 800x400 and the button is 84px (settings.ts::FIRE_BTN_SIZE_PX).
+const gear = nodes.find((n) => n.className === 'gear-btn');
+gear.dispatch('click');
+check('opening the settings panel puts the fire button in placement mode (.placing)',
+  fireEl.classList.contains('placing'));
+check('…and raises the settings-open flag that makes the look pad visible',
+  document.documentElement.classList.contains('settings-open'));
+const PD = { preventDefault() {}, stopPropagation() {} };
+fireEl.dispatch('pointerdown', { pointerId: 7, clientX: 742, clientY: 342, ...PD });
+fireEl.dispatch('pointermove', { pointerId: 7, clientX: 142, clientY: 142, ...PD });
+check('dragging writes right/bottom insets and moves the button live (top-left -> 100,100)',
+  stickVars['--fire-rx'] === '616px' && stickVars['--fire-ry'] === '216px',
+  `${stickVars['--fire-rx']} / ${stickVars['--fire-ry']}`);
+fireEl.dispatch('pointerup', { pointerId: 7 });
+fireEl.dispatch('pointerdown', { pointerId: 8, clientX: 742, clientY: 342, ...PD });
+fireEl.dispatch('pointermove', { pointerId: 8, clientX: 2000, clientY: 2000, ...PD });
+check('a drag past the edge clamps the WHOLE button inside the viewport',
+  stickVars['--fire-rx'] === '0px' && stickVars['--fire-ry'] === '0px',
+  `${stickVars['--fire-rx']} / ${stickVars['--fire-ry']}`);
+fireEl.dispatch('pointerup', { pointerId: 8 });
+fireEl.dispatch('pointermove', { pointerId: 8, clientX: 10, clientY: 10, ...PD });
+check('a move after release is ignored (the drag session really ended)',
+  stickVars['--fire-rx'] === '0px' && stickVars['--fire-ry'] === '0px');
 
 // 操控 reset must clear ONLY the stick group
 resets[0].dispatch('click');
 check('操控 reset -> stick back to the landscape default (72px), camera untouched (1.5)',
   stickVars['--stick-size'] === '72px' && cameraPushes.at(-1) === 1.5,
   `${stickVars['--stick-size']} / ${cameraPushes.at(-1)}`);
+check('…and it resets the fire button position and the camera sensitivity with it',
+  stickVars['--fire-rx'] === '8px' && stickVars['--fire-ry'] === String(8 + 72 + 14) + 'px'
+  && yawScalePushes.at(-1) === 90,
+  `${stickVars['--fire-rx']} / ${stickVars['--fire-ry']} / ${yawScalePushes.at(-1)}`);
 
 // dragging the camera slider must reach the renderer callback immediately
 camRange.value = '1.4';
@@ -429,7 +520,7 @@ check('…and it left the stick, camera, vision and both light values untouched'
   const stickRows = nodes.find((n) => n.className === 'set-rows two-col');
   check('the 操控 page\'s rows container is the two-column one, the others are not',
     stickRows !== undefined
-    && stickRows.children.filter((c) => c.className === 'set-row').length === 5
+    && stickRows.children.filter((c) => c.className === 'set-row').length === 6
     && nodes.filter((n) => n.className === 'set-rows').length === 5,
     String(nodes.filter((n) => n.className === 'set-rows').length));
 }
@@ -460,6 +551,35 @@ check('…and it left the stick, camera, vision and both light values untouched'
     && /display:flex/.test(rule('.settings-panel'))
     && /display:none/.test(rule('.settings-panel[hidden]')),
     rule('.settings-panel').slice(0, 60));
+  // --- the LOOK PAD (the right stick) ---------------------------------------------------------
+  // Three properties carry the whole request, and all three are invisible in a screenshot-less
+  // environment: transparent during play, revealed only by the settings flag, and BELOW the other
+  // controls so a huge invisible rectangle cannot eat the movement stick.
+  check('the look pad is transparent and borderless during play',
+    /background:transparent/.test(rule('#stickR')) && /border:none/.test(rule('#stickR')),
+    rule('#stickR').slice(0, 90));
+  check('the look pad sits BELOW the other controls (z-index 5 < .stick 6)',
+    /z-index:5/.test(rule('#stickR')) && /z-index:6/.test(rule('.stick')),
+    `${/z-index:(\d+)/.exec(rule('#stickR'))?.[1]} vs ${/z-index:(\d+)/.exec(rule('.stick'))?.[1]}`);
+  check('the look pad is sized by --look-w/--look-h (a rectangle, not the stick diameter)',
+    /width:var\(--look-w/.test(rule('#stickR')) && /height:var\(--look-h/.test(rule('#stickR')));
+  check('the look pad is revealed only while the settings panel is open, above the panel but inert',
+    /background:/.test(rule('html.settings-open #stickR'))
+    && /z-index:40/.test(rule('html.settings-open #stickR'))
+    && /pointer-events:none/.test(rule('html.settings-open #stickR')),
+    rule('html.settings-open #stickR').slice(0, 90));
+  // The BALL is gone: the pad is press-anchored, so there is nothing to move and nothing to draw.
+  // Asserted on both sides — the stylesheet must not style a pad knob, and the markup must not
+  // contain one — because either half alone would leave a stray dot on screen.
+  check('the look pad has no knob rule (no ball concept)',
+    !/#stickR\s+\.knob/.test(cssRules), '#stickR .knob still present');
+  check('…and its markup has no knob element',
+    (() => {
+      const html = readFileSync(new URL('../apps/shooter/index.html', import.meta.url), 'utf8');
+      const i = html.indexOf('id="stickR"');
+      if (i === -1) return false;
+      return !/knob/.test(html.slice(i, html.indexOf('>', i)));
+    })(), 'index.html still renders a knob inside #stickR');
   check('…with the body as the only scrolling region and the header/tabs pinned above it',
     /overflow-y:auto/.test(rule('.set-body')) && /flex:1/.test(rule('.set-body'))
     && /flex:none/.test(rule('.set-head')) && /flex:none/.test(rule('.set-tabs')));
@@ -509,6 +629,122 @@ check('…and it left the stick, camera, vision and both light values untouched'
 
   btn.dispatch('keydown', { code: 'KeyA', key: 'a', preventDefault() {} });
   check('other keys do nothing', cycles === 4, String(cycles));
+}
+
+// ---------------------------------------------------------------- fire button wiring
+// Same leaf-module treatment as the weapon button: `src/fireButton.ts` owns the CONTINUOUS held
+// state (press = shoot, release = stop), which `bindActionButton` cannot express because it is
+// one-shot. Its two failure modes are both pinned here: a stuck trigger, and a placement press being
+// mistaken for a shot.
+{
+  const { bindFireButton } = await import(new URL('../dist/apps/shooter/src/fireButton.js', import.meta.url).href);
+  const btn = mkEl('button');
+  const seen = [];
+  const fire = bindFireButton(btn);
+  fire.onChange((held) => seen.push(held));
+  const bound = Object.keys(btn.listeners);
+
+  check('fire button binds pointerdown/up/cancel + keydown/keyup and NOT click',
+    ['pointerdown', 'pointerup', 'pointercancel', 'keydown', 'keyup'].every((k) => bound.includes(k))
+    && !bound.includes('click'),
+    bound.join(','));
+  check('it starts released', fire.isHeld() === false);
+
+  let stopped = false;
+  btn.dispatch('pointerdown', { pointerId: 1, stopPropagation: () => { stopped = true; } });
+  check('pointerdown starts firing immediately and stops propagation (no canvas yaw drag)',
+    fire.isHeld() === true && stopped && btn.classList.contains('on'), `held=${fire.isHeld()}`);
+  btn.dispatch('pointerup', { pointerId: 1 });
+  check('pointerup stops firing and clears the pressed style',
+    fire.isHeld() === false && !btn.classList.contains('on'));
+  check('the held state was reported on every change', JSON.stringify(seen) === '[true,false]', JSON.stringify(seen));
+
+  btn.dispatch('pointerdown', { pointerId: 2, stopPropagation() {} });
+  btn.dispatch('pointercancel', { pointerId: 2 });
+  check('pointercancel stops firing (an OS gesture takeover cannot leave a stuck trigger)',
+    fire.isHeld() === false);
+
+  btn.dispatch('pointerdown', { pointerId: 3, stopPropagation() {} });
+  fire.reset();
+  check('reset() force-releases the trigger (used when the game pauses)', fire.isHeld() === false);
+
+  // PLACEMENT MODE: the panel adds `.placing` and drags the button; the same press must NOT shoot.
+  btn.classList.toggle('placing', true);
+  let stoppedWhilePlacing = false;
+  btn.dispatch('pointerdown', { pointerId: 4, stopPropagation: () => { stoppedWhilePlacing = true; } });
+  check('a press while `.placing` does not fire (the panel owns that gesture)',
+    fire.isHeld() === false && !stoppedWhilePlacing);
+  btn.classList.toggle('placing', false);
+
+  btn.dispatch('keydown', { code: 'Enter', key: 'Enter', preventDefault() {} });
+  check('Enter holds the trigger (keyboard activation)', fire.isHeld() === true);
+  btn.dispatch('keyup', { code: 'Enter', key: 'Enter' });
+  check('keyup releases it', fire.isHeld() === false);
+  let prevented = false;
+  btn.dispatch('keydown', { code: 'Space', key: ' ', preventDefault: () => { prevented = true; } });
+  check('Space holds the trigger and preventDefaults (no page scroll)', fire.isHeld() === true && prevented);
+  btn.dispatch('keyup', { code: 'Space', key: ' ' });
+  check('Space releases it', fire.isHeld() === false);
+}
+
+// ---------------------------------------------------------------- the look pad is PRESS-ANCHORED
+// The reported bug, pinned end to end: 「每次按右边区域都会有朝向跳变」. `Input` is driven through the
+// same DOM shim, because the fix is the ORIGIN choice inside the joystick (`input.ts`), not the math
+// alone — `verify-stick.mjs` proves the arithmetic, this proves the wiring.
+{
+  const { Input } = await import(new URL('../dist/apps/shooter/src/input.js', import.meta.url).href);
+  const pad = mkEl('div');
+  pad.rect = { left: 400, top: 100, width: 368, height: 168 };   // the landscape look pad
+  const stick = mkEl('div');
+  stick.rect = { left: 8, top: 300, width: 72, height: 72 };      // the left joystick
+  const input = new Input(stick, pad, mkEl('canvas'));
+  input.setCameraYaw(0);
+  input.setYawScale(90);          // full deflection = 90 deg, so half a drag is easy to spot
+  const PD = { preventDefault() {}, stopPropagation() {} };
+  const TRAVEL = 90;              // stick.ts::PRESS_TRAVEL_PX
+
+  // Land FAR off the pad's centre (its centre is at 584,184; this is ~284px to the right of it).
+  // With the old centre origin this single press snapped the view; it must now be a no-op.
+  const px = 868, py = 130;
+  pad.dispatch('pointerdown', { pointerId: 11, clientX: px, clientY: py, ...PD });
+  input.sample();
+  check('pressing the look pad off-centre does NOT turn the camera (the jump is gone)',
+    input.cameraYaw() === 0, `yaw=${input.cameraYaw()} (old centre origin would be ≈ -90)`);
+
+  // Half a travel to the right = half the sensitivity, turning RIGHT (negative psi).
+  pad.dispatch('pointermove', { pointerId: 11, clientX: px + TRAVEL / 2, clientY: py, ...PD });
+  input.sample();
+  check('then dragging right turns the view right at half deflection',
+    Math.abs(input.cameraYaw() + 45) < 1e-9, String(input.cameraYaw()));
+
+  // Releasing freezes; stray moves afterwards are ignored.
+  pad.dispatch('pointerup', { pointerId: 11 });
+  const frozen = input.cameraYaw();
+  pad.dispatch('pointermove', { pointerId: 11, clientX: px + TRAVEL, clientY: py, ...PD });
+  input.sample();
+  check('releasing freezes the angle and later moves are ignored', input.cameraYaw() === frozen,
+    `${input.cameraYaw()} vs ${frozen}`);
+
+  // A SECOND press somewhere else must re-anchor from zero, not step from the previous gesture.
+  pad.dispatch('pointerdown', { pointerId: 12, clientX: px - 260, clientY: py + 40, ...PD });
+  input.sample();
+  check('a fresh press anywhere re-anchors without stepping', input.cameraYaw() === frozen,
+    `${input.cameraYaw()} vs ${frozen}`);
+  pad.dispatch('pointerup', { pointerId: 12 });
+
+  // The LEFT stick is untouched by all this: it keeps its FIXED base, so pressing its centre is
+  // still "no input" and pushing off it still moves. The yaw is reset first — the pad left it at
+  // -45, and screen input is mapped THROUGH the yaw, so leaving it would rotate the expected vector.
+  input.setCameraYaw(0);
+  stick.dispatch('pointerdown', { pointerId: 21, clientX: 8 + 36, clientY: 300 + 36, ...PD });
+  const atCentre = input.sample();
+  check('the left stick is still centre-anchored (a press at its centre is no input)',
+    atCentre.move.x === 0 && atCentre.move.y === 0, JSON.stringify(atCentre.move));
+  stick.dispatch('pointermove', { pointerId: 21, clientX: 8 + 36 + 200, clientY: 300 + 36, ...PD });
+  const pushed = input.sample();
+  check('…and pushing it right still moves (world +X at camera yaw 0)',
+    Math.abs(pushed.move.x - 1) < 1e-9 && Math.abs(pushed.move.y) < 1e-9, JSON.stringify(pushed.move));
+  stick.dispatch('pointerup', { pointerId: 21 });
 }
 
 // ---------------------------------------------------------------- report

@@ -1,0 +1,404 @@
+; FBX 7.4.0 project file
+; ------------------------------------------------------------------
+; Hand-written ASCII FBX TEST FIXTURE for the 门户 FBX 转换器 sub-app.
+;
+; WHY THIS FILE EXISTS: the converter's whole promise is "FBX in, GLB out,
+; animations intact", and this repo has no browser, so the only way to prove
+; that promise on the CPU side is to ship a tiny FBX that the SAME vendored
+; FBXLoader/GLTFExporter can chew through in Node (scripts/verify-fbx2glb.mjs
+; runs the real pipeline over this exact file). It is also the app's
+; 「载入样例」 button, so the UI can be exercised on a phone with no file at hand.
+;
+; WHAT IT CONTAINS (deliberately shaped like a Mixamo download, only tiny):
+;   * a 2-bone armature (mixamorigHips -> mixamorigSpine) under a Null "Armature"
+;   * a box mesh SKINNED to those two bones (clusters + bind pose + weights)
+;   * one material
+;   * TWO animation stacks, BOTH named "mixamo.com" — the real Mixamo take name,
+;     which is exactly why the converter renames clips after the file by default
+;     and why its dedupe path (mixamo.com, mixamo.com.001 …) has to exist
+;   * the two clips animate DIFFERENT track kinds (rotation + translation)
+; It is 8 vertices / 6 quads: enough to exercise skin+animation+material through
+; the loader and the exporter, small enough to read.
+; ------------------------------------------------------------------
+
+FBXHeaderExtension:  {
+	FBXHeaderVersion: 1003
+	FBXVersion: 7400
+	CreationTimeStamp:  {
+		Version: 1000
+		Year: 2026
+		Month: 1
+		Day: 1
+		Hour: 0
+		Minute: 0
+		Second: 0
+		Millisecond: 0
+	}
+	Creator: "portal fbx2glb sample"
+}
+GlobalSettings:  {
+	Version: 1000
+	Properties70:  {
+		P: "UpAxis", "int", "Integer", "",1
+		P: "UpAxisSign", "int", "Integer", "",1
+		P: "FrontAxis", "int", "Integer", "",2
+		P: "FrontAxisSign", "int", "Integer", "",1
+		P: "CoordAxis", "int", "Integer", "",0
+		P: "CoordAxisSign", "int", "Integer", "",1
+		P: "UnitScaleFactor", "double", "Number", "",1
+		P: "OriginalUnitScaleFactor", "double", "Number", "",1
+	}
+}
+Definitions:  {
+	Version: 100
+	Count: 16
+	ObjectType: "Model" {
+		Count: 4
+	}
+	ObjectType: "Geometry" {
+		Count: 1
+	}
+	ObjectType: "Material" {
+		Count: 1
+	}
+	ObjectType: "Deformer" {
+		Count: 3
+	}
+	ObjectType: "Pose" {
+		Count: 1
+	}
+	ObjectType: "AnimationStack" {
+		Count: 2
+	}
+	ObjectType: "AnimationLayer" {
+		Count: 2
+	}
+	ObjectType: "AnimationCurveNode" {
+		Count: 2
+	}
+	ObjectType: "AnimationCurve" {
+		Count: 6
+	}
+}
+Objects:  {
+	Geometry: 1001, "Geometry::BodyGeo", "Mesh" {
+		Vertices: *24 {
+			a: -0.2,0,-0.2,0.2,0,-0.2,0.2,0,0.2,-0.2,0,0.2,-0.2,1.6,-0.2,0.2,1.6,-0.2,0.2,1.6,0.2,-0.2,1.6,0.2
+		}
+		PolygonVertexIndex: *24 {
+			a: 0,1,2,-4,4,7,6,-6,0,4,5,-2,1,5,6,-3,2,6,7,-4,3,7,4,-1
+		}
+		GeometryVersion: 124
+		LayerElementNormal: 0 {
+			Version: 102
+			Name: ""
+			MappingInformationType: "ByPolygonVertex"
+			ReferenceInformationType: "Direct"
+			Normals: *72 {
+				a: 0,-1,0,0,-1,0,0,-1,0,0,-1,0,0,1,0,0,1,0,0,1,0,0,1,0,0,0,-1,0,0,-1,0,0,-1,0,0,-1,1,0,0,1,0,0,1,0,0,1,0,0,0,0,1,0,0,1,0,0,1,0,0,1,-1,0,0,-1,0,0,-1,0,0,-1,0,0
+			}
+		}
+		LayerElementUV: 0 {
+			Version: 101
+			Name: "UVChannel_1"
+			MappingInformationType: "ByPolygonVertex"
+			ReferenceInformationType: "IndexToDirect"
+			UV: *24 {
+				a: 0,0,1,0,1,1,0,1,0,0,1,0,1,1,0,1,0,0,0,1,1,1,1,0
+			}
+			UVIndex: *24 {
+				a: 0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3
+			}
+		}
+		Layer: 0 {
+			Version: 100
+			LayerElement:  {
+				Type: "LayerElementNormal"
+				TypedIndex: 0
+			}
+			LayerElement:  {
+				Type: "LayerElementUV"
+				TypedIndex: 0
+			}
+		}
+	}
+	Model: 2000, "Model::Armature", "Null" {
+		Version: 232
+		Properties70:  {
+			P: "Lcl Translation", "Lcl Translation", "", "A",0,0,0
+			P: "Lcl Rotation", "Lcl Rotation", "", "A",0,0,0
+			P: "Lcl Scaling", "Lcl Scaling", "", "A",1,1,1
+			P: "RotationOrder", "enum", "", "",0
+		}
+	}
+	Model: 2001, "Model::mixamorigHips", "LimbNode" {
+		Version: 232
+		Properties70:  {
+			P: "Lcl Translation", "Lcl Translation", "", "A",0,0,0
+			P: "Lcl Rotation", "Lcl Rotation", "", "A",0,0,0
+			P: "Lcl Scaling", "Lcl Scaling", "", "A",1,1,1
+			P: "RotationOrder", "enum", "", "",0
+			P: "InheritType", "enum", "", "",1
+		}
+	}
+	Model: 2002, "Model::mixamorigSpine", "LimbNode" {
+		Version: 232
+		Properties70:  {
+			P: "Lcl Translation", "Lcl Translation", "", "A",0,0.8,0
+			P: "Lcl Rotation", "Lcl Rotation", "", "A",0,0,0
+			P: "Lcl Scaling", "Lcl Scaling", "", "A",1,1,1
+			P: "RotationOrder", "enum", "", "",0
+			P: "InheritType", "enum", "", "",1
+		}
+	}
+	Model: 2100, "Model::Body", "Mesh" {
+		Version: 232
+		Properties70:  {
+			P: "Lcl Translation", "Lcl Translation", "", "A",0,0,0
+			P: "Lcl Rotation", "Lcl Rotation", "", "A",0,0,0
+			P: "Lcl Scaling", "Lcl Scaling", "", "A",1,1,1
+		}
+	}
+	Material: 6001, "Material::BodyMat", "" {
+		Version: 102
+		ShadingModel: "phong"
+		MultiLayer: 0
+		Properties70:  {
+			P: "DiffuseColor", "Color", "", "A",0.85,0.35,0.2
+			P: "SpecularColor", "Color", "", "A",0.1,0.1,0.1
+			P: "Shininess", "double", "Number", "",20
+		}
+	}
+	Deformer: 3002, "Deformer::Skin", "Skin" {
+		Version: 101
+	}
+	Deformer: 3003, "SubDeformer::ClusterHips", "Cluster" {
+		Version: 100
+		UserData: ""
+		Indexes: *4 {
+			a: 0,1,2,3
+		}
+		Weights: *4 {
+			a: 1,1,1,1
+		}
+		Transform: *16 {
+			a: 1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1
+		}
+		TransformLink: *16 {
+			a: 1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1
+		}
+	}
+	Deformer: 3004, "SubDeformer::ClusterSpine", "Cluster" {
+		Version: 100
+		UserData: ""
+		Indexes: *4 {
+			a: 4,5,6,7
+		}
+		Weights: *4 {
+			a: 1,1,1,1
+		}
+		Transform: *16 {
+			a: 1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1
+		}
+		TransformLink: *16 {
+			a: 1,0,0,0,0,1,0,0,0,0,1,0,0,0.8,0,1
+		}
+	}
+	Pose: 4000, "Pose::BIND_POSES", "BindPose" {
+		Type: "BindPose"
+		Version: 100
+		NbPoseNodes: 4
+		PoseNode:  {
+			Node: 2000
+			Matrix: *16 {
+				a: 1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1
+			}
+		}
+		PoseNode:  {
+			Node: 2001
+			Matrix: *16 {
+				a: 1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1
+			}
+		}
+		PoseNode:  {
+			Node: 2002
+			Matrix: *16 {
+				a: 1,0,0,0,0,1,0,0,0,0,1,0,0,0.8,0,1
+			}
+		}
+		PoseNode:  {
+			Node: 2100
+			Matrix: *16 {
+				a: 1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1
+			}
+		}
+	}
+	AnimationStack: 5000, "AnimStack::mixamo.com", "" {
+		Properties70:  {
+			P: "LocalStop", "KTime", "Time", "",46186158000
+			P: "ReferenceStop", "KTime", "Time", "",46186158000
+		}
+	}
+	AnimationLayer: 5001, "AnimLayer::BaseLayer", "" {
+	}
+	AnimationCurveNode: 5002, "AnimCurveNode::R", "" {
+		Properties70:  {
+			P: "d|X", "Number", "", "A",0
+			P: "d|Y", "Number", "", "A",0
+			P: "d|Z", "Number", "", "A",0
+		}
+	}
+	AnimationCurve: 5003, "AnimCurve::", "" {
+		Default: 0
+		KeyVer: 4009
+		KeyTime: *3 {
+			a: 0,23093079000,46186158000
+		}
+		KeyValueFloat: *3 {
+			a: 0,30,0
+		}
+		KeyAttrFlags: *1 {
+			a: 24836
+		}
+		KeyAttrDataFloat: *4 {
+			a: 0,0,0,0
+		}
+		KeyAttrRefCount: *1 {
+			a: 3
+		}
+	}
+	AnimationCurve: 5004, "AnimCurve::", "" {
+		Default: 0
+		KeyVer: 4009
+		KeyTime: *3 {
+			a: 0,23093079000,46186158000
+		}
+		KeyValueFloat: *3 {
+			a: 0,0,0
+		}
+		KeyAttrFlags: *1 {
+			a: 24836
+		}
+		KeyAttrDataFloat: *4 {
+			a: 0,0,0,0
+		}
+		KeyAttrRefCount: *1 {
+			a: 3
+		}
+	}
+	AnimationCurve: 5005, "AnimCurve::", "" {
+		Default: 0
+		KeyVer: 4009
+		KeyTime: *3 {
+			a: 0,23093079000,46186158000
+		}
+		KeyValueFloat: *3 {
+			a: 0,0,0
+		}
+		KeyAttrFlags: *1 {
+			a: 24836
+		}
+		KeyAttrDataFloat: *4 {
+			a: 0,0,0,0
+		}
+		KeyAttrRefCount: *1 {
+			a: 3
+		}
+	}
+	AnimationStack: 5100, "AnimStack::mixamo.com", "" {
+		Properties70:  {
+			P: "LocalStop", "KTime", "Time", "",46186158000
+			P: "ReferenceStop", "KTime", "Time", "",46186158000
+		}
+	}
+	AnimationLayer: 5101, "AnimLayer::BaseLayer", "" {
+	}
+	AnimationCurveNode: 5102, "AnimCurveNode::T", "" {
+		Properties70:  {
+			P: "d|X", "Number", "", "A",0
+			P: "d|Y", "Number", "", "A",0
+			P: "d|Z", "Number", "", "A",0
+		}
+	}
+	AnimationCurve: 5103, "AnimCurve::", "" {
+		Default: 0
+		KeyVer: 4009
+		KeyTime: *3 {
+			a: 0,23093079000,46186158000
+		}
+		KeyValueFloat: *3 {
+			a: 0,0.2,0
+		}
+		KeyAttrFlags: *1 {
+			a: 24836
+		}
+		KeyAttrDataFloat: *4 {
+			a: 0,0,0,0
+		}
+		KeyAttrRefCount: *1 {
+			a: 3
+		}
+	}
+	AnimationCurve: 5104, "AnimCurve::", "" {
+		Default: 0
+		KeyVer: 4009
+		KeyTime: *3 {
+			a: 0,23093079000,46186158000
+		}
+		KeyValueFloat: *3 {
+			a: 0,0,0
+		}
+		KeyAttrFlags: *1 {
+			a: 24836
+		}
+		KeyAttrDataFloat: *4 {
+			a: 0,0,0,0
+		}
+		KeyAttrRefCount: *1 {
+			a: 3
+		}
+	}
+	AnimationCurve: 5105, "AnimCurve::", "" {
+		Default: 0
+		KeyVer: 4009
+		KeyTime: *3 {
+			a: 0,23093079000,46186158000
+		}
+		KeyValueFloat: *3 {
+			a: 0,0,0
+		}
+		KeyAttrFlags: *1 {
+			a: 24836
+		}
+		KeyAttrDataFloat: *4 {
+			a: 0,0,0,0
+		}
+		KeyAttrRefCount: *1 {
+			a: 3
+		}
+	}
+}
+Connections:  {
+	C: "OO",1001,2100
+	C: "OO",2100,2000
+	C: "OO",2001,2000
+	C: "OO",2002,2001
+	C: "OO",6001,2100
+	C: "OO",3002,1001
+	C: "OO",3003,3002
+	C: "OO",3004,3002
+	C: "OO",2001,3003
+	C: "OO",2002,3004
+	C: "OO",5001,5000
+	C: "OO",5002,5001
+	C: "OP",5003,5002, "d|Y"
+	C: "OP",5004,5002, "d|X"
+	C: "OP",5005,5002, "d|Z"
+	C: "OP",5002,2002, "Lcl Rotation"
+	C: "OO",5101,5100
+	C: "OO",5102,5101
+	C: "OP",5103,5102, "d|Y"
+	C: "OP",5104,5102, "d|X"
+	C: "OP",5105,5102, "d|Z"
+	C: "OP",5102,2001, "Lcl Translation"
+}

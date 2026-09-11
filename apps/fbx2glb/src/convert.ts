@@ -1,0 +1,221 @@
+/**
+ * The two halves of the pipeline that touch three's loaders/exporters, plus the small amount of GLB
+ * container math the export scale needs. Everything here is a thin, honest wrapper — the decisions
+ * (naming, merging, scaling) live in the pure modules, and this file only does the I/O around them.
+ *
+ * BROWSER-ONLY by nature, but it also runs in Node (scripts/verify-fbx2glb.mjs drives it through the
+ * real sample.fbx) as long as `FileReader` exists — GLTFExporter's binary path uses it. The app itself
+ * runs in a real browser, so textures, canvas and FileReader all exist there; that is the whole reason
+ * the converter is a web app instead of a CLI: FBXLoader needs `document`/`window.URL` for embedded
+ * textures, and GLTFExporter needs a canvas to re-encode images.
+ */
+import type { LoadedFbx } from './merge.js';
+
+export interface ExportOptions {
+  format: 'glb' | 'gltf';
+  /** Clips to write into the file (empty array = static model). */
+  animations: readonly any[];
+  /** Uniform scale applied on export (see units.ts). 1 = untouched. */
+  scale: number;
+}
+
+export interface ExportResult {
+  blob: Blob;
+  bytes: number;
+  /** `model/gltf-binary` or `model/gltf+json`. */
+  mime: string;
+}
+
+export interface SelfCheck {
+  /** Clips found in the written file, by name. */
+  clipNames: string[];
+  /** Bones in the written file. */
+  bones: number;
+  /** Height in metres as written (after the export scale). */
+  height: number;
+  meshes: number;
+  skinned: number;
+}
+
+export interface GlbChunks {
+  json: any;
+  /** The BIN chunk, or null for a JSON-only GLB (legal, though our exporter never writes one). */
+  bin: Uint8Array | null;
+}
+
+const GLB_MAGIC = 0x46546c67;
+const CHUNK_JSON = 0x4e4f534a;
+const CHUNK_BIN = 0x004e4942;
+
+/** Parse a GLB into its JSON + BIN chunks. Bounds-checked: a truncated file throws, it does not lie. */
+export function readGlb(buffer: ArrayBuffer): GlbChunks {
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+  if (buffer.byteLength < 12 || view.getUint32(0, true) !== GLB_MAGIC) throw new Error('不是 GLB 文件');
+  const total = view.getUint32(8, true);
+  if (total > buffer.byteLength) throw new Error('GLB 头声明的长度超过了文件本身');
+  let offset = 12;
+  let json: any = null;
+  let bin: Uint8Array | null = null;
+  while (offset + 8 <= total) {
+    const length = view.getUint32(offset, true);
+    const type = view.getUint32(offset + 4, true);
+    const body = bytes.subarray(offset + 8, offset + 8 + length);
+    if (type === CHUNK_JSON) json = JSON.parse(new TextDecoder().decode(body));
+    else if (type === CHUNK_BIN) bin = body;
+    offset += 8 + length;
+  }
+  if (!json) throw new Error('GLB 里没有 JSON chunk');
+  return { json, bin };
+}
+
+/** Serialize JSON + BIN back into a GLB (4-byte aligned chunks: JSON padded with spaces, BIN with 0). */
+export function writeGlb(json: any, bin: Uint8Array | null): ArrayBuffer {
+  const jsonBytes = new TextEncoder().encode(JSON.stringify(json));
+  const jsonPad = (4 - (jsonBytes.length % 4)) % 4;
+  const binPad = bin ? (4 - (bin.length % 4)) % 4 : 0;
+  const total = 12 + 8 + jsonBytes.length + jsonPad + (bin ? 8 + bin.length + binPad : 0);
+  const out = new Uint8Array(total);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, GLB_MAGIC, true);
+  view.setUint32(4, 2, true);
+  view.setUint32(8, total, true);
+  let offset = 12;
+  view.setUint32(offset, jsonBytes.length + jsonPad, true);
+  view.setUint32(offset + 4, CHUNK_JSON, true);
+  out.set(jsonBytes, offset + 8);
+  out.fill(0x20, offset + 8 + jsonBytes.length, offset + 8 + jsonBytes.length + jsonPad);
+  offset += 8 + jsonBytes.length + jsonPad;
+  if (bin) {
+    view.setUint32(offset, bin.length + binPad, true);
+    view.setUint32(offset + 4, CHUNK_BIN, true);
+    out.set(bin, offset + 8);
+    offset += 8 + bin.length + binPad;
+  }
+  return out.buffer as ArrayBuffer;
+}
+
+/**
+ * Apply a uniform export scale by wrapping the scene's ROOT NODE in a new parent node.
+ *
+ * ⚠️ WHY THIS IS DONE IN THE JSON AND NOT BY SCALING A `Group` AROUND THE SCENE — a real bug found by
+ * scripts/verify-fbx2glb.mjs: the exporter writes `boneInverses[i] × bindMatrix` as the glTF inverse
+ * bind matrices while the vertex data and the bone hierarchy keep their original numbers. A scale
+ * added as a real parent node therefore lands in TWO places at once — the skin math (which sees the
+ * scaled bone world matrices) and the node transform — and a 1.6-unit model came out 0.00016 instead
+ * of 0.016, i.e. scaled twice. Wrapping the FINISHED glTF is exact by construction: a uniform scale
+ * above the whole graph multiplies every skinned vertex exactly once, because the joint matrices and
+ * the bind matrices live in the same space. It also keeps the exporter's inputs untouched, so nothing
+ * about the skin can depend on whether a scale was requested.
+ */
+export function wrapSceneRoot(json: any, scale: number): void {
+  if (!Number.isFinite(scale) || scale === 1) return;
+  const scenes = json?.scenes;
+  if (!Array.isArray(scenes) || scenes.length === 0) return;
+  const scene = scenes[json.scene ?? 0] ?? scenes[0];
+  if (!scene) return;
+  if (!Array.isArray(json.nodes)) json.nodes = [];
+  json.nodes.push({
+    name: 'scale' + scale,
+    scale: [scale, scale, scale],
+    children: Array.isArray(scene.nodes) ? scene.nodes : [],
+  });
+  scene.nodes = [json.nodes.length - 1];
+}
+
+/** The same operation on a finished GLB (parse → wrap → re-serialize). */
+export function scaleGlb(buffer: ArrayBuffer, scale: number): ArrayBuffer {
+  if (!Number.isFinite(scale) || scale === 1) return buffer;
+  const { json, bin } = readGlb(buffer);
+  wrapSceneRoot(json, scale);
+  return writeGlb(json, bin);
+}
+
+/** Parse one FBX buffer into a scene + clips. Rejects with the loader's own message. */
+export async function parseFbx(buffer: ArrayBuffer, file: string): Promise<LoadedFbx> {
+  // @ts-ignore - vendored three addon, untyped (same escape hatch as apps/shooter/src/assets.ts)
+  const { FBXLoader } = await import('../vendor/addons/loaders/FBXLoader.js');
+  const loader = new FBXLoader();
+  // `path` is empty: any texture the FBX references as an EXTERNAL file cannot be resolved from a
+  // dropped file (there is no directory to resolve against), which the report calls out. Embedded
+  // textures work fine.
+  const root = loader.parse(buffer, '');
+  const clips = Array.isArray(root?.animations) ? root.animations : [];
+  return { file, root, clips };
+}
+
+/** Read a picked/dropped File and parse it. */
+export async function loadFbxFile(file: File): Promise<LoadedFbx> {
+  const buffer = await file.arrayBuffer();
+  return parseFbx(buffer, file.name);
+}
+
+/** Export a scene to a Blob. The scale is applied to the FINISHED file (see wrapSceneRoot). */
+export async function exportScene(root: any, opts: ExportOptions): Promise<ExportResult> {
+  // @ts-ignore - vendored three addon, untyped
+  const { GLTFExporter } = await import('../vendor/addons/exporters/GLTFExporter.js');
+  const binary = opts.format !== 'gltf';
+  const result: any = await new Promise((resolve, reject) => {
+    new GLTFExporter().parse(root, resolve, reject, {
+      binary,
+      animations: [...opts.animations],
+      onlyVisible: false,
+    });
+  });
+  if (binary) {
+    const raw: ArrayBuffer = result instanceof Blob ? await result.arrayBuffer() : result;
+    const bytes = scaleGlb(raw, opts.scale);
+    const blob = new Blob([bytes], { type: 'model/gltf-binary' });
+    return { blob, bytes: blob.size, mime: 'model/gltf-binary' };
+  }
+  // The JSON path embeds the buffer as a base64 data URI, so the .gltf stays a single file.
+  const json = result;
+  wrapSceneRoot(json, opts.scale);
+  const blob = new Blob([JSON.stringify(json)], { type: 'model/gltf+json' });
+  return { blob, bytes: blob.size, mime: 'model/gltf+json' };
+}
+
+/**
+ * Read the file we just wrote back with three's GLTFLoader and report what is inside it. This is the
+ * app's self-check: the exported GLB is a binary blob, and the only trustworthy statement about it is
+ * "a fresh loader parsed it and found these clips/joints". Failures are returned, not thrown.
+ */
+export async function selfCheck(buffer: ArrayBuffer): Promise<SelfCheck | { error: string }> {
+  try {
+    // @ts-ignore - vendored three addon, untyped
+    const { GLTFLoader } = await import('../vendor/addons/loaders/GLTFLoader.js');
+    const loader = new GLTFLoader();
+    const gltf: any = await new Promise((resolve, reject) => {
+      loader.parse(buffer, '', resolve, reject);
+    });
+    const scene = gltf.scene;
+    let meshes = 0, skinned = 0, bones = 0;
+    scene?.traverse?.((o: any) => {
+      if (o.isBone) bones++;
+      if (o.isMesh) meshes++;
+      if (o.isSkinnedMesh) skinned++;
+    });
+    const { measureSize } = await import('./analyze.js');
+    return {
+      clipNames: (gltf.animations ?? []).map((c: any) => String(c.name)),
+      bones, meshes, skinned,
+      height: measureSize(scene).y,
+    };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Trigger a browser download for a produced Blob (no server round trip: the bytes stay local). */
+export function downloadBlob(blob: Blob, fileName: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // Revoke on the next tick: Safari needs the URL to survive the click.
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}

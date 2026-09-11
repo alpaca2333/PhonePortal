@@ -33,14 +33,15 @@
 // ./fog.ts the height fog, ./grade.ts and ./vignette.ts the finishing pass.
 import { loadSettings, saveSettings } from '../../../shared/src/settings.js';
 import {
-  CAMERA_LIMITS, FOG_LIMITS, LIGHT_LIMITS, LIMITS, LOOK_LIMITS, VISION_LIMITS, orientationOf,
-  effectiveFor, effectiveCamera, effectiveVision, effectiveLight, effectiveFog, effectiveLook,
-  writeOverride, writeCameraOverride, writeVisionOverride, writeLightOverride, writeFogOverride,
-  writeLookOverride, clearStickOverrides, clearCameraOverrides, clearVisionOverrides,
-  clearLightOverrides, clearFogOverrides, clearLookOverrides, hasStickOverrides, hasCameraOverrides,
-  hasVisionOverrides, hasLightOverrides, hasFogOverrides, hasLookOverrides, createState,
+  CAMERA_LIMITS, FIRE_BTN_SIZE_PX, FOG_LIMITS, LIGHT_LIMITS, LIMITS, LOOK_LIMITS, VISION_LIMITS,
+  orientationOf, effectiveFor, effectiveCamera, effectiveVision, effectiveLight, effectiveFog,
+  effectiveLook, lookPadSize, writeOverride, writeCameraOverride, writeVisionOverride,
+  writeLightOverride, writeFogOverride, writeLookOverride, clearStickOverrides, clearCameraOverrides,
+  clearVisionOverrides, clearLightOverrides, clearFogOverrides, clearLookOverrides,
+  hasStickOverrides, hasCameraOverrides, hasVisionOverrides, hasLightOverrides, hasFogOverrides,
+  hasLookOverrides, createState,
 } from './settings.js';
-import type { Orientation, RawSettings, StickKey, StickLayout, Viewport } from './settings.js';
+import type { Orientation, RawSettings, StickKey, StickLayout, StickSliderKey, Viewport } from './settings.js';
 // Display-only helpers, so the readouts are computed from the same constants the sliders and the
 // renderer use (a percent that only exists in the panel would be a third copy of the model).
 import { ambientPercentOfLegacy, directionalPercent } from './lighting.js';
@@ -54,11 +55,13 @@ export const SETTINGS_SCOPE = 'shooter';
 
 const SAVE_DEBOUNCE_MS = 400;
 
-/** Every slider in the panel: the five stick keys plus the camera, vision and lighting keys. */
+/** Every slider in the panel: the 操控 keys, camera, vision and lighting keys, fog and look. */
 type SliderKey = StickKey | 'heightScale' | 'yaw' | 'dim' | 'ambient' | 'directional' | 'density'
   | 'tone' | 'vignette' | 'pixel';
 const CAMERA_SLIDER_KEY: SliderKey = 'heightScale';
 const YAW_SLIDER_KEY: SliderKey = 'yaw';
+/** 「摄像机灵敏度」 — stored in the 操控 group (see settings.ts::StickLayout). */
+const YAW_SCALE_SLIDER_KEY: SliderKey = 'yawScaleDeg';
 const VISION_SLIDER_KEY: SliderKey = 'dim';
 const LIGHT_SLIDER_KEY: SliderKey = 'ambient';
 const DIRECTIONAL_SLIDER_KEY: SliderKey = 'directional';
@@ -76,25 +79,36 @@ export function currentViewport(): Viewport {
  * so this is the single place where the setting becomes visual. The knob travel is NOT set here:
  * input.ts measures the element's rendered box, so it follows any size automatically.
  */
-export function applyStickLayout(l: StickLayout): void {
+export function applyStickLayout(l: StickLayout, vp: Viewport = currentViewport()): void {
   const s = document.documentElement.style;
   s.setProperty('--stick-size', l.sizePx + 'px');
   s.setProperty('--stick-lx', l.leftX + 'px');
   s.setProperty('--stick-ly', l.leftY + 'px');
   s.setProperty('--stick-rx', l.rightX + 'px');
   s.setProperty('--stick-ry', l.rightY + 'px');
+  // The fire button's insets ride the same path: one place turns the 操控 layout into CSS, so the
+  // button cannot end up positioned by a second, drifting rule.
+  s.setProperty('--fire-rx', l.fireX + 'px');
+  s.setProperty('--fire-ry', l.fireY + 'px');
+  // The right stick is a look PAD: its size comes from the VIEWPORT (settings.ts::lookPadSize), not
+  // from `sizePx`, which is why it is written here rather than being part of StickLayout.
+  const pad = lookPadSize(vp);
+  s.setProperty('--look-w', pad.w + 'px');
+  s.setProperty('--look-h', pad.h + 'px');
 }
 
 /**
- * The 操控 rows. X/Y of one stick are adjacent on purpose: with two sliders per row (`two-col`) the
- * pairs read as "left stick (X, Y)", "right stick (X, Y)", then the shared size on its own line.
+ * The 操控 rows. X/Y of one control are adjacent on purpose: with two sliders per row (`two-col`)
+ * the pairs read as "left stick (X, Y)", "look pad (X, Y)", then the shared size on its own line.
+ * `sizePx` is the LEFT stick only — the look pad is sized from the viewport (settings.ts::lookPadSize),
+ * so its label must not promise otherwise.
  */
-const STICK_ROWS: ReadonlyArray<{ key: StickKey; label: string }> = [
+const STICK_ROWS: ReadonlyArray<{ key: StickSliderKey; label: string }> = [
   { key: 'leftX', label: '左摇杆 X（距左边）' },
   { key: 'leftY', label: '左摇杆 Y（距底边）' },
-  { key: 'rightX', label: '右摇杆 X（距右边）' },
-  { key: 'rightY', label: '右摇杆 Y（距底边）' },
-  { key: 'sizePx', label: '摇杆大小' },
+  { key: 'rightX', label: '视角区 X（距右边）' },
+  { key: 'rightY', label: '视角区 Y（距底边）' },
+  { key: 'sizePx', label: '左摇杆大小' },
 ];
 
 /** One page = one group. Order matches the shipped panel (操控 / 画面 / 视野 / 光照 / 雾 / 后期). */
@@ -149,10 +163,23 @@ export interface SettingsPanelOptions {
   onCameraChange?: (heightScale: number) => void;
   /**
    * Called with the effective camera horizontal angle in degrees on the same occasions. main.ts
-   * forwards it to BOTH GameRenderer.setCameraYaw (the pose) and Input.setCameraYaw (the stick
-   * mapping), which is why the panel does not need to know about either.
+   * forwards it to BOTH Input.setCameraYaw (the mapping) and GameRenderer.setCameraYaw (the pose),
+   * which is why the panel does not need to know about either. This is the RESTING angle: the right
+   * stick moves the camera relative to it (see camera.ts::stickYawTarget).
    */
   onCameraYawChange?: (yaw: number) => void;
+  /**
+   * Called with the effective right-stick camera sensitivity (yaw degrees at full deflection) on the
+   * same occasions. Input-only: main.ts forwards it to Input.setYawScale.
+   */
+  onYawScaleChange?: (deg: number) => void;
+  /**
+   * The FIRE button element. When the panel is open it becomes the drag handle for its own position
+   * (that is the requirement: "drag the button itself"): the panel adds `.placing` — which styles.css
+   * lifts above the panel — and turns the pointer drag into `fireX`/`fireY` overrides through the
+   * same `clampLayout` cap the sticks use. Optional so the panel still builds without it.
+   */
+  fireButton?: HTMLElement;
   /**
    * Called with the effective occlusion darkness whenever it changes, for the same reasons and on
    * the same occasions as `onCameraChange`. 0 means the feature is off (main.ts forwards it to
@@ -272,9 +299,13 @@ export function createSettingsPanel(opts: SettingsPanelOptions = {}): SettingsPa
   panel.append(head, tabBar, body);
   stage.append(gear, panel);
 
-  // 操控 page
-  const stickSliders = new Map<StickKey, SliderControl>();
+  // 操控 page: the five stick geometry keys, the right-stick camera sensitivity, and (below the
+  // sliders) the fire button, which is moved by DRAGGING IT rather than by a pair of sliders.
+  const stickSliders = new Map<StickSliderKey, SliderControl>();
   for (const row of STICK_ROWS) stickSliders.set(row.key, addRow('stick', row.label, row.key));
+  const yawScaleSlider = addRow('stick', '摄像机灵敏度（满行程）', YAW_SCALE_SLIDER_KEY);
+  const fireHint = el('p', 'set-hint', '开火键：按住屏幕上的圆形按钮即可拖动位置（松手保存）');
+  rowsBoxes.get('stick')?.append(fireHint);
   // 画面 page
   const cameraSlider = addRow('camera', '摄像机高度', CAMERA_SLIDER_KEY);
   const yawSlider = addRow('camera', '摄像机水平角度', YAW_SLIDER_KEY);
@@ -310,6 +341,7 @@ export function createSettingsPanel(opts: SettingsPanelOptions = {}): SettingsPa
   const effective = (): StickLayout => effectiveFor(raw, orientation, currentViewport());
   const effectiveCam = (): number => effectiveCamera(raw, orientation).heightScale;
   const effectiveYaw = (): number => effectiveCamera(raw, orientation).yaw;
+  const effectiveYawScale = (): number => effectiveFor(raw, orientation, currentViewport()).yawScaleDeg;
   const effectiveVis = (): number => effectiveVision(raw, orientation).dim;
   const effectiveAmb = (): number => effectiveLight(raw, orientation).ambient;
   const effectiveDir = (): number => effectiveLight(raw, orientation).directional;
@@ -320,9 +352,10 @@ export function createSettingsPanel(opts: SettingsPanelOptions = {}): SettingsPa
     effectiveLook(raw, orientation);
 
   function apply(): void {
-    applyStickLayout(effective());
+    applyStickLayout(effective(), currentViewport());
     opts.onCameraChange?.(effectiveCam());
     opts.onCameraYawChange?.(effectiveYaw());
+    opts.onYawScaleChange?.(effectiveYawScale());
     opts.onVisionChange?.(effectiveVis());
     opts.onLightChange?.(effectiveAmb());
     opts.onDirectionalChange?.(effectiveDir());
@@ -341,6 +374,7 @@ export function createSettingsPanel(opts: SettingsPanelOptions = {}): SettingsPa
     const layout = effective();
     const cam = effectiveCam();
     const yaw = effectiveYaw();
+    const yawScale = effectiveYawScale();
     const vis = effectiveVis();
     const amb = effectiveAmb();
     const dir = effectiveDir();
@@ -370,6 +404,14 @@ export function createSettingsPanel(opts: SettingsPanelOptions = {}): SettingsPa
       if (key !== draggingKey) c.input.value = String(layout[key]);
       c.out.textContent = Math.round(layout[key]) + ' px';
     }
+
+    const yslim = LIMITS.yawScaleDeg;
+    yawScaleSlider.input.min = String(yslim.min);
+    yawScaleSlider.input.max = String(yslim.max);
+    yawScaleSlider.input.step = String(yslim.step);
+    if (draggingKey !== YAW_SCALE_SLIDER_KEY) yawScaleSlider.input.value = String(yawScale);
+    // Degrees, because that is the unit the player can reason about ("a full push turns me 90° 左右").
+    yawScaleSlider.out.textContent = yawScale + '°';
 
     const clim = CAMERA_LIMITS.heightScale;
     cameraSlider.input.min = String(clim.min);
@@ -504,6 +546,8 @@ export function createSettingsPanel(opts: SettingsPanelOptions = {}): SettingsPa
   for (const [key, c] of stickSliders) {
     bindSlider(key, c, (v) => writeOverride(raw, orientation, key, v));
   }
+  bindSlider(YAW_SCALE_SLIDER_KEY, yawScaleSlider,
+    (v) => writeOverride(raw, orientation, 'yawScaleDeg', v));
   bindSlider(CAMERA_SLIDER_KEY, cameraSlider, (v) => writeCameraOverride(raw, orientation, 'heightScale', v));
   bindSlider(YAW_SLIDER_KEY, yawSlider, (v) => writeCameraOverride(raw, orientation, 'yaw', v));
   bindSlider(VISION_SLIDER_KEY, visionSlider, (v) => writeVisionOverride(raw, orientation, 'dim', v));
@@ -529,11 +573,71 @@ export function createSettingsPanel(opts: SettingsPanelOptions = {}): SettingsPa
 
   tabs.forEach((tab, i) => tab.addEventListener('click', () => setPage(i)));
 
+  // --- fire button placement: drag the REAL HUD button ----------------------------------------
+  // The panel is `inset:0` (z-index 30), so a button underneath it could never be dragged. While the
+  // panel is open the button therefore carries `.placing`, which styles.css lifts above the panel
+  // (z-index 40); the press is then a placement drag instead of a trigger (`fireButton.ts` ignores
+  // presses made while `.placing` is set), so the same gesture cannot mean both things.
+  //
+  // The pointer is converted to RIGHT/BOTTOM INSETS — the same coordinate system as the stick insets
+  // — so the stored value means the same thing in both orientations, and the grab offset is
+  // preserved so the button does not jump under the finger.
+  const fireEl = opts.fireButton ?? null;
+  let fireDrag: { pointerId: number; grabX: number; grabY: number } | null = null;
+
+  function fireDragFrom(clientX: number, clientY: number, grabX: number, grabY: number): void {
+    const vp = currentViewport();
+    const left = clientX - grabX;
+    const top = clientY - grabY;
+    // `apply()` re-clamps through `effective()` → `clampLayout`, so dragging into a corner parks the
+    // whole button on screen instead of half of it hanging off the edge.
+    writeOverride(raw, orientation, 'fireX', vp.width - (left + FIRE_BTN_SIZE_PX));
+    writeOverride(raw, orientation, 'fireY', vp.height - (top + FIRE_BTN_SIZE_PX));
+    apply();
+    scheduleSave();
+  }
+
+  if (fireEl) {
+    fireEl.addEventListener('pointerdown', (e: Event) => {
+      if (!fireEl.classList.contains('placing')) return;   // not in placement mode -> it is the trigger
+      const p = e as PointerEvent;
+      e.preventDefault();
+      e.stopPropagation();
+      const r = fireEl.getBoundingClientRect();
+      fireDrag = { pointerId: p.pointerId, grabX: p.clientX - r.left, grabY: p.clientY - r.top };
+      if (fireEl.setPointerCapture) fireEl.setPointerCapture(p.pointerId);
+    });
+    fireEl.addEventListener('pointermove', (e: Event) => {
+      const p = e as PointerEvent;
+      if (!fireDrag || p.pointerId !== fireDrag.pointerId) return;
+      e.preventDefault();
+      fireDragFrom(p.clientX, p.clientY, fireDrag.grabX, fireDrag.grabY);
+    });
+    const endFireDrag = (e: Event): void => {
+      const p = e as PointerEvent;
+      if (!fireDrag || p.pointerId !== fireDrag.pointerId) return;
+      fireDrag = null;
+      // The position is an override now, so the 操控 reset button's enabled state must follow.
+      syncControls();
+    };
+    fireEl.addEventListener('pointerup', endFireDrag);
+    fireEl.addEventListener('pointercancel', endFireDrag);
+  }
+
   function setOpen(next: boolean): void {
     open = next;
     panel.hidden = !next;
     gear.classList.toggle('on', next);
     gear.setAttribute('aria-expanded', String(next));
+    // Placement mode is exactly "the panel is open": the button is above the panel and drag-only.
+    if (fireEl) {
+      fireEl.classList.toggle('placing', next);
+      if (!next) fireDrag = null;
+    }
+    // The LOOK PAD (the right stick) is invisible during play and only becomes visible while the
+    // panel is open, so its position can be adjusted against a real outline. The flag lives on
+    // <html> next to the layout CSS variables — same owner, same lifetime as the panel.
+    document.documentElement.classList.toggle('settings-open', next);
     if (next) {
       syncControls();
     } else {

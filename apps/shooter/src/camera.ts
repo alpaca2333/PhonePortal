@@ -119,6 +119,88 @@ export function cameraYawRad(deg: number): number {
   return (clampCameraYaw(deg) * Math.PI) / 180;
 }
 
+// ---------------------------------------------------------------------------
+// 「摄像机灵敏度」: the RIGHT STICK drives the yaw (see input.ts)
+// ---------------------------------------------------------------------------
+// The right stick is no longer an aim stick: it is a look stick, and its ONLY usable axis is the
+// horizontal one. Pressing it captures the camera yaw at that moment (the anchor), and while the
+// finger is down the yaw is `anchor + reading.x * scale`. Releasing FREEZES the angle there (it does
+// not spring back), so the player keeps the view they turned to; the next press re-anchors.
+//
+// WHY THE ANCHOR IS CAPTURED AND NOT INTEGRATED: integrating `yaw += dx * scale` every frame would
+// accumulate float drift and make the same gesture land somewhere different depending on frame rate.
+// Anchoring makes the whole gesture one pure function of (anchor, reading) — reproducible, and
+// testable in Node.
+//
+// The anchor is the camera yaw from the previous frame, which equals the character's facing: in this
+// game the player ALWAYS faces the camera's forward direction (game.ts applies the input's world
+// view direction to `aimAngle` unconditionally), so "the yaw I had" and "the way I was facing" are
+// the same number. That is why one anchor serves both readings of the requirement.
+export const YAW_SCALE_MIN = 20;      // degrees of yaw at full stick deflection
+export const YAW_SCALE_MAX = 180;
+export const YAW_SCALE_STEP = 5;
+export const YAW_SCALE_DEFAULT = 90;  // a full push turns the view a right angle
+
+/** Clamp the sensitivity; anything non-finite falls back to the default (hand-edited JSON). */
+export function clampYawScale(v: number): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return YAW_SCALE_DEFAULT;
+  if (v < YAW_SCALE_MIN) return YAW_SCALE_MIN;
+  if (v > YAW_SCALE_MAX) return YAW_SCALE_MAX;
+  return v;
+}
+
+/**
+ * Fold an angle into (-180, 180]. NOT `clampCameraYaw`: a look control must be able to keep turning
+ * past the ±180 seam instead of jamming against it. `clampCameraYaw` stays the rule for the STORED
+ * setting (what is written to the server), which is a different question from "where is the camera
+ * pointing right now".
+ */
+export function wrapYawDeg(deg: number): number {
+  if (!Number.isFinite(deg)) return 0;
+  let d = ((deg + 180) % 360 + 360) % 360 - 180;
+  // The modulo above yields [-180, 180); the documented range is (-180, 180], so -180 becomes +180.
+  if (d === -180) d = 180;
+  return d;
+}
+
+/**
+ * The camera yaw a horizontal look reading produces: `anchor - readingX * scale`, wrapped. Pure, so
+ * `scripts/verify-stick.mjs` can pin the direction and the seam without a DOM.
+ *
+ * WHY MINUS (this is the FIXED, not-inverted case): ψ > 0 moves the camera toward the player's +X
+ * side (see the sign convention above), which makes the world appear to rotate LEFT — so a rightward
+ * reading must DECREASE ψ for the view to turn right. The first shipped version added, and the
+ * real-device feedback was exactly 「右摇杆操作反向」. The sign lives HERE, in one pure function, so the
+ * touch pad and the desktop drag cannot drift apart.
+ */
+export function stickYawTarget(anchorDeg: number, readingX: number, scaleDeg: number): number {
+  const a = Number.isFinite(anchorDeg) ? anchorDeg : 0;
+  const x = Number.isFinite(readingX) ? readingX : 0;
+  return wrapYawDeg(a - x * clampYawScale(scaleDeg));
+}
+
+/**
+ * Desktop fallback only (there is no right pad on a keyboard+mouse): pointer drag on the canvas
+ * turns the view horizontally. Degrees per CSS pixel of horizontal drag — small on purpose, because
+ * a mouse drag covers far more pixels per second than a thumb does.
+ */
+export const MOUSE_YAW_DEG_PER_PX = 0.25;
+
+/**
+ * The yaw a horizontal POINTER DRAG produces: `dxPx` is the drag since the press, and it goes
+ * through the same sign rule as the pad, so dragging right turns the view right exactly like pushing
+ * the pad right.
+ *
+ * Deliberately NOT `stickYawTarget(anchor, dxPx, MOUSE_YAW_DEG_PER_PX)`: that helper clamps its scale
+ * into the stick-sensitivity range (20–180), which would silently turn a 0.25 deg/px mouse into a
+ * 20 deg/px one.
+ */
+export function lookYawFromPixels(anchorDeg: number, dxPx: number): number {
+  const a = Number.isFinite(anchorDeg) ? anchorDeg : 0;
+  const dx = Number.isFinite(dxPx) ? dxPx : 0;
+  return wrapYawDeg(a - dx * MOUSE_YAW_DEG_PER_PX);
+}
+
 /**
  * Eye position relative to the player, world units. Multiply the whole triple by the viewport dolly
  * (`camZoom`) if you need the dollied pose: the dolly scales both components of `cameraOffset`

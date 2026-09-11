@@ -15,15 +15,16 @@ html,body{height:100%;overflow:hidden;background:#0b0e14;color:#e6edf3;font-fami
    large / where the user moves the joysticks. */
 #hud{position:absolute;top:0;left:0;right:0;padding:calc(env(safe-area-inset-top) + 10px) 14px 0;display:flex;align-items:center;justify-content:space-between;gap:14px;pointer-events:none;z-index:7}
 /* Left group grows; the right group is a separate flex item so the FPS badge lands flush in
-   the top-right corner. Do NOT collapse this into one row with `margin-left:auto`: #bar is
-   `flex:1`, and auto margins are resolved against free space, which makes the HP bar's width
-   depend on margin resolution order (it can collapse to 0). */
+   the top-right corner. Do NOT collapse this into one row with `margin-left:auto`: auto margins are
+   resolved against free space, and the two groups must stay independent flex items for the right
+   one to stay pinned. */
 #hudLeft{flex:1;min-width:0;display:flex;align-items:center;gap:14px}
 /* `center`, not `baseline`: #ammo is a two-row column (count above bar), and baseline alignment
    would line its first row up with the score's baseline and push the bar out of the row. */
 #hudRight{flex:none;display:flex;align-items:center;gap:12px}
-#bar{flex:1;max-width:46%;height:16px;background:rgba(255,255,255,.14);border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,.18)}
-#hpfill{height:100%;width:100%;background:linear-gradient(90deg,#4caf50,#8bc34a);transition:width .12s ease}
+/* NOTE: the player's health bar and armour strip are NOT here — they are world-space bars above the
+   character's head (hud.ts::PLAYER_BAR_Y, drawn by render.ts). The top-left corner only carries the
+   wave counter now. */
 #wave{font-weight:700;color:var(--accent);font-size:16px;text-shadow:0 1px 2px #000;white-space:nowrap}
 #score{font-variant-numeric:tabular-nums;font-weight:700;font-size:18px;text-shadow:0 1px 2px #000}
 #score::before{content:'⚔ ';opacity:.7}
@@ -67,15 +68,13 @@ html,body{height:100%;overflow:hidden;background:#0b0e14;color:#e6edf3;font-fami
 #diagPanel.hidden{display:none}
 
 /* ---------------------------------------------------------------------------------------------
-   Armour readout + ammo level badge + the two action buttons (throwable / healing).
+   Ammo level badge + the two action buttons (throwable / healing).
    The LEVEL COLOUR is the shared 1..6 palette (armor.ts::LEVEL_COLORS: white/green/blue/purple/
    gold/red) and it is always written through the `--lv` custom property by render.ts or
    inventoryPanel.ts — never hard-coded here, so a level can never render in the wrong colour.
+   (The player's ARMOUR readout is a world-space bar above the head now, not a chip in #hud: see
+   hud.ts::PLAYER_ARMOR_BAR_Y.)
    --------------------------------------------------------------------------------------------- */
-#armorBox{flex:none;display:flex;flex-direction:column;align-items:flex-start;gap:3px}
-#armorChip{font-size:11.5px;font-weight:700;white-space:nowrap;color:#9fb4c7;text-shadow:0 1px 2px #000}
-#armorBar{display:block;width:46px;height:3px;border-radius:2px;background:rgba(255,255,255,.18);overflow:hidden}
-#armorFill{display:block;height:100%;width:100%;background:#9fb4c7}
 /* Ammo level badge: pill outlined in the level colour (the same language as the enemy armour bar). */
 #ammoLevel{font-size:10px;font-weight:700;line-height:1;padding:2px 6px;border-radius:999px;border:1px solid currentColor;white-space:nowrap;text-shadow:0 1px 2px #000}
 /* The weapon button dims when there is no second weapon to switch to (only one weapon slot filled). */
@@ -89,6 +88,19 @@ html,body{height:100%;overflow:hidden;background:#0b0e14;color:#e6edf3;font-fami
 .act-btn:active{background:rgba(64,196,255,.25)}
 /* On cooldown: still visible (hiding it would make the HUD jump) but clearly not usable. */
 .act-btn.cd{opacity:.45}
+
+/* FIRE — the only control that shoots, so it is the largest tap target on the HUD. Its position is a
+   SETTING (--fire-rx / --fire-ry, written by settingsPanel.ts::applyStickLayout; the default lives in
+   settings.ts::defaultsFor = just above the LEFT stick, the one region that is empty in both
+   orientations at every stick size). z-index 8 > #hud's 7 > .stick's 6, so no layout can cover it.
+   `.placing` is added while the settings panel is open: the panel is `inset:0;z-index:30`, so a
+   button underneath it could never be dragged — lifting it to 40 makes the real button the drag
+   handle, which is exactly the "drag the button itself" requirement. */
+.fire-btn{position:absolute;right:max(var(--fire-rx,26px),env(safe-area-inset-right));bottom:max(var(--fire-ry,188px),env(safe-area-inset-bottom));width:var(--fire-size,84px);height:var(--fire-size,84px);border-radius:50%;pointer-events:auto;touch-action:none;cursor:pointer;font-family:inherit;font-weight:800;font-size:14px;letter-spacing:1px;color:#eaf4ff;text-shadow:0 1px 3px #000;border:2px solid rgba(255,255,255,.28);background:radial-gradient(circle at 50% 40%, rgba(255,90,90,.5), rgba(120,20,20,.62) 72%);box-shadow:0 6px 18px rgba(0,0,0,.45);z-index:8;user-select:none;-webkit-user-select:none}
+.fire-btn:active,.fire-btn.on{background:radial-gradient(circle at 50% 40%, rgba(255,140,140,.85), rgba(170,30,30,.78) 72%);border-color:rgba(255,255,255,.5)}
+/* Only while the settings panel is open — the drag handle. */
+.fire-btn.placing{z-index:40;border-style:dashed;border-color:var(--accent);cursor:grab;opacity:.92}
+.fire-btn.placing:active{cursor:grabbing}
 
 /* Bag button: centred, just ABOVE the gear. The bottom centre is the only screen area free in both
    orientations, but the gear already owns the exact centre and the two sticks leave only ~52px of
@@ -137,16 +149,30 @@ html,body{height:100%;overflow:hidden;background:#0b0e14;color:#e6edf3;font-fami
    document.elementFromPoint(), so the ghost must never be the element under the finger. */
 .inv-ghost{position:fixed;left:0;top:0;transform:translate(-50%,-50%);pointer-events:none;z-index:40;max-width:150px;padding:4px 8px;border-radius:7px;background:rgba(10,14,20,.92);border:1px solid var(--accent);color:#e6edf3;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 6px 18px rgba(0,0,0,.5)}
 
-/* joysticks — geometry is a USER SETTING, applied as CSS variables on :root by
-   settingsPanel.ts (--stick-size / --stick-lx / --stick-ly / --stick-rx / --stick-ry).
-   The var() fallbacks reproduce the old portrait defaults, so the sticks stay usable if the
-   script never runs. input.ts measures the rendered element and derives knob travel from it, so
-   any size / any position stays playable. */
+/* Controls — the LEFT stick is a joystick, the RIGHT one is a LOOK PAD.
+   Geometry is a USER SETTING, applied as CSS variables on :root by settingsPanel.ts
+   (--stick-size / --stick-lx / --stick-ly / --stick-rx / --stick-ry / --look-w / --look-h).
+   The var() fallbacks reproduce the portrait defaults, so the controls stay usable if the script
+   never runs. input.ts measures the rendered element and derives knob travel from it, so any size /
+   any position stays playable.
+
+   THE LOOK PAD (right): a large fully TRANSPARENT rectangle — the camera's touch area. It is
+   invisible during play and only drawn while the settings panel is open, where the `.settings-open`
+   flag on <html> (settingsPanel.ts::setOpen) reveals a dashed outline plus the knob so its position
+   can be judged against the real screen.
+   ⚠️ z-index 5, BELOW `.stick`'s 6, and that is load-bearing: the pad is big enough to overlap the
+   left stick and the fire button, and it must lose every one of those contests. A lower layer never
+   receives the touch, so a huge invisible rectangle cannot eat the movement stick. While the panel is
+   open it is lifted ABOVE the panel (z-index 40; the panel is 32) but made `pointer-events:none`, so
+   the outline is visible without stealing the panel's own taps. */
 .stick{position:absolute;width:var(--stick-size,148px);height:var(--stick-size,148px);border-radius:50%;background:rgba(255,255,255,.07);border:2px solid rgba(255,255,255,.16);z-index:6;touch-action:none}
 #stickL{left:max(var(--stick-lx,26px),env(safe-area-inset-left));bottom:max(var(--stick-ly,26px),env(safe-area-inset-bottom))}
-#stickR{right:max(var(--stick-rx,26px),env(safe-area-inset-right));bottom:max(var(--stick-ry,26px),env(safe-area-inset-bottom))}
+#stickR{right:max(var(--stick-rx,26px),env(safe-area-inset-right));bottom:max(var(--stick-ry,26px),env(safe-area-inset-bottom));width:var(--look-w,200px);height:var(--look-h,365px);border-radius:14px;background:transparent;border:none;z-index:5}
 .knob{position:absolute;left:50%;top:50%;width:44%;height:44%;border-radius:50%;transform:translate(-50%,-50%);background:radial-gradient(circle at 30% 30%, rgba(255,255,255,.55), rgba(255,255,255,.25) 60%, rgba(255,255,255,.1));box-shadow:0 2px 8px rgba(0,0,0,.4)}
-#stickR .knob{background:radial-gradient(circle at 30% 30%, rgba(64,196,255,.8), rgba(64,196,255,.35) 60%, rgba(64,196,255,.15))}
+/* The pad has NO KNOB: there is no ball to drag, because the finger's landing point is the zero
+   (input.ts, origin 'press'). The outline below is the only thing ever drawn for it, and only while
+   the settings panel is open — during play the pad is PURELY transparent. */
+html.settings-open #stickR{background:rgba(64,196,255,.07);border:2px dashed rgba(64,196,255,.55);z-index:40;pointer-events:none}
 .stick .label{position:absolute;left:0;right:0;top:-24px;text-align:center;font-size:12px;opacity:.55;letter-spacing:.5px}
 
 /* settings entry — bottom centre: the only spot free in both orientations (sticks own the
@@ -240,9 +266,9 @@ html,body{height:100%;overflow:hidden;background:#0b0e14;color:#e6edf3;font-fami
   #overlay h2{font-size:24px}
   #overlay p{font-size:14px}
   #overlay button{font-size:15px;padding:8px 24px}
-  /* armour / ammo level / action buttons / backpack — one notch slimmer, like the rest of the HUD */
-  #armorChip{font-size:9.5px}
-  #armorBar{width:34px;height:2px}
+  /* ammo level / action buttons / backpack — one notch slimmer, like the rest of the HUD.
+     (The armour chip is gone: the player's armour is a world-space bar above the character, which
+     does not scale with HUD type.) */
   #ammoLevel{font-size:9px;padding:1px 5px}
   .act-btn{font-size:10.5px;min-height:26px;padding:4px 10px;border-left-width:3px}
   .inv-btn{width:30px;height:30px;font-size:13px;bottom:calc(max(6px,env(safe-area-inset-bottom)) + 40px);opacity:.6}

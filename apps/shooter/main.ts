@@ -5,6 +5,7 @@ import { loadCharTemplate, loadPropGeometries } from './src/assets.js';
 import { createSettingsPanel } from './src/settingsPanel.js';
 import { createInventoryPanel } from './src/inventoryPanel.js';
 import { bindActionButton } from './src/weaponButton.js';
+import { bindFireButton } from './src/fireButton.js';
 import { createDiag } from './src/diag.js';
 import { PLAYER_CHARACTER, ENEMY_CHARACTER } from './src/characters.js';
 
@@ -17,6 +18,12 @@ const input = new Input(
   canvas,
 );
 
+// FIRE is its own control now (the right stick turns the camera). `bindFireButton` owns the
+// press/release state; the sim reads it through `input.setFireHeld`, which is mirrored here rather
+// than polled, so there is exactly one owner of "is the trigger down".
+const fire = bindFireButton(document.getElementById('fireBtn') as HTMLElement);
+fire.onChange((held) => { input.setFireHeld(held); });
+
 // Two overlays can pause the simulation: the settings panel and the backpack. They are independent
 // flags combined into one predicate — assigning a single `paused` variable from both callbacks was
 // how one panel closing would resume the game while the other was still open.
@@ -28,12 +35,24 @@ const paused = (): boolean => settingsOpen || inventoryOpen;
 // the renderer) live on the server. The panel owns the DOM and calls back; this file only reacts:
 // freeze the simulation while the panel is open, and forward the renderer values.
 createSettingsPanel({
-  onOpenChange: (open) => { settingsOpen = open; },
+  onOpenChange: (open) => {
+    settingsOpen = open;
+    // Opening the panel pauses the game — and while it is open the fire button is its DRAG HANDLE
+    // (see settingsPanel.ts). Either way the trigger must come up, or the player would resume with
+    // it stuck down.
+    if (open) fire.reset();
+  },
   onCameraChange: (heightScale) => { renderer.setCameraHeightScale(heightScale); },
-  // 「摄像机水平角度」: the renderer poses the camera with it, and the input layer maps the sticks
-  // through it — both consumers get the SAME number here, which is what keeps "push up on the stick"
-  // meaning "away from the camera" at any angle (see camera.ts::screenToWorld).
-  onCameraYawChange: (yaw) => { renderer.setCameraYaw(yaw); input.setCameraYaw(yaw); },
+  // 「摄像机水平角度」: the RESTING yaw. The right stick moves the camera relative to it, so this is
+  // the value the session starts from (the live yaw is deliberately not persisted — see README).
+  // Pushed to BOTH consumers: the renderer's pose (so the slider previews while the game is paused)
+  // and the input layer (so the sticks are mapped through the angle the player is looking along).
+  onCameraYawChange: (yaw) => { input.setCameraYaw(yaw); renderer.setCameraYaw(yaw); },
+  // 「摄像机灵敏度」: yaw degrees per full right-stick deflection (camera.ts). Input-only.
+  onYawScaleChange: (deg) => { input.setYawScale(deg); },
+  // The panel drags this element directly while it is open (that is the "drag the button itself"
+  // requirement); nothing else about the button lives in the panel.
+  fireButton: fire.element,
   // 0 means "vision off" — GameRenderer.setVisionDim then hides the overlay and skips all gating.
   onVisionChange: (dim) => { renderer.setVisionDim(dim); },
   // Light multipliers (see lighting.ts): ambient ships OFF; the directional one scales both
@@ -178,6 +197,10 @@ function frame(now: number): void {
     diag.begin('sim');
     sim.update(dt, input.sample());
     diag.end('sim');
+    // The right stick MOVES the camera, so the live yaw has to reach the renderer every frame. It is
+    // pushed inside the pause guard on purpose: while the panel is open it owns the yaw (and pushes
+    // the slider value itself), and re-applying a stale live angle here would fight it.
+    renderer.setCameraYaw(input.cameraYaw());
   }
   diag.begin('sync');
   renderer.sync(dt);

@@ -1,0 +1,8 @@
+{
+  "id": "fbx2glb",
+  "name": "FBX → GLB",
+  "description": "本机把 FBX 转成 glTF/GLB；可把多个 Mixamo 动作文件合并成一个自带全部动作的角色文件",
+  "icon": "🧊",
+  "color": "#ff8a65",
+  "order": 6
+}

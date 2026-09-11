@@ -182,6 +182,42 @@ export const ARMOR_BAR_Y = barFrameTop(BAR_Y, BAR_H) + BAR_FRAME_GAP + barFrameH
 export const ARMOR_BAR_CLEARANCE = barFrameBottom(ARMOR_BAR_Y, ARMOR_BAR_H) - barFrameTop(BAR_Y, BAR_H);
 
 // ---------------------------------------------------------------------------------------------
+// The PLAYER's head bars: health, its armour strip, and the reload strip above them
+// ---------------------------------------------------------------------------------------------
+// Same construction as the enemy pair — the armour strip sits one BAR_FRAME_GAP clear of the health
+// bar's FRAME (not its fill; that mistake is why the enemy bars overlapped once) — so the player's
+// two bars can never touch for the same structural reason.
+//
+// WHY THE PLAYER'S IS WIDER (`PLAYER_BAR_W` 1.4 vs the enemy's 1.15, ~22% longer): the head bar is
+// now the ONLY health readout (the top-left DOM bar and armour chip were removed on request), and in
+// a crowded firefight two bars at the same width would be ambiguous at a glance. Width is the one
+// channel that does not collide with the health FRACTION (length of the fill) or the armour LEVEL
+// (colour), so it is what identifies "this one is mine".
+export const PLAYER_BAR_W = 1.4;      // fill width for BOTH player bars
+export const PLAYER_BAR_Y = 2.45;     // player health centre height (enemy health is BAR_Y = 2.3)
+
+/** Centre height of the player's armour strip: one frame gap above the player's health bar. */
+export const PLAYER_ARMOR_BAR_Y =
+  barFrameTop(PLAYER_BAR_Y, BAR_H) + BAR_FRAME_GAP + barFrameHeight(ARMOR_BAR_H) / 2;
+
+/** Clear space between the player's health frame and the armour strip's frame. */
+export const PLAYER_ARMOR_CLEARANCE =
+  barFrameBottom(PLAYER_ARMOR_BAR_Y, ARMOR_BAR_H) - barFrameTop(PLAYER_BAR_Y, BAR_H);
+
+/**
+ * Centre height of the player's reload strip: above the armour strip, using the full health-bar
+ * height. It must clear the ARMOUR strip (not the health bar) or a reloading, armoured player would
+ * see two bars overlap — and the reload bar is the one the player reads under pressure.
+ */
+export const PLAYER_RELOAD_BAR_Y =
+  barFrameTop(PLAYER_ARMOR_BAR_Y, ARMOR_BAR_H) + BAR_FRAME_GAP + barFrameHeight(BAR_H) / 2;
+
+/** Clear space between the armour strip's frame and the reload bar's frame. */
+export const PLAYER_RELOAD_CLEARANCE =
+  barFrameBottom(PLAYER_RELOAD_BAR_Y, BAR_H) - barFrameTop(PLAYER_ARMOR_BAR_Y, ARMOR_BAR_H);
+
+
+// ---------------------------------------------------------------------------------------------
 // World-space bar SLOT ALLOCATION
 // ---------------------------------------------------------------------------------------------
 // Every bar written to the pools is ONE frame instance plus ONE fill instance. The bug this exists
@@ -195,7 +231,8 @@ export const ARMOR_BAR_CLEARANCE = barFrameBottom(ARMOR_BAR_Y, ARMOR_BAR_H) - ba
 // consecutive `next()` calls must hand out distinct, increasing slots). A hand-maintained index is
 // exactly the kind of thing that silently regresses the next time a bar is added.
 export const MAX_ENEMY_BARS = 128;                       // enemies that get bars at all
-export const MAX_BAR_SLOTS = MAX_ENEMY_BARS * 2 + 1;    // health + armour per enemy, + reload bar
+// health + armour per enemy, + the PLAYER's three strips (health, armour, reload).
+export const MAX_BAR_SLOTS = MAX_ENEMY_BARS * 2 + 3;
 
 export interface BarAllocator {
   /** frame-pool index of the bar most recently taken (`next()` returned true); -1 = none yet */

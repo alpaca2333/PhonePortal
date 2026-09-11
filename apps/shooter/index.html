@@ -14,13 +14,9 @@
     <canvas id="game"></canvas>
     <div id="hud">
       <div id="hudLeft">
-        <div id="bar"><div id="hpfill"></div></div>
-        <!-- Armour: the plate lives in the BACKPACK's armour slot, so this chip is a straight
-             readout of that item (level in the 1..6 colour, current/max value, or 无护甲). -->
-        <div id="armorBox" title="护甲">
-          <span id="armorChip">无护甲</span>
-          <span id="armorBar"><i id="armorFill"></i></span>
-        </div>
+        <!-- The player's health and armour are drawn in WORLD SPACE above the character's head
+             (render.ts + hud.ts::PLAYER_BAR_Y), not here: one readout per fact, and the head bar is
+             the one that stays visible while the player looks around. Only the wave counter is left. -->
         <div id="wave">第 1 波</div>
       </div>
       <div id="hudRight">
@@ -41,7 +37,18 @@
       </div>
     </div>
     <div id="stickL" class="stick"><div class="knob"></div></div>
-    <div id="stickR" class="stick"><div class="knob"></div></div>
+    <!-- RIGHT = LOOK PAD, not a joystick: a large transparent rectangle covering the camera's touch
+         area (only its horizontal axis is read). It has NO KNOB on purpose — there is no ball to
+         drag, because the finger's own landing point is the zero (input.ts, origin 'press'), so the
+         reading always starts at 0 wherever you touch. It is invisible during play; opening the
+         settings panel puts `.settings-open` on <html>, which draws its outline so the position can
+         be judged. Size comes from the viewport (settings.ts::lookPadSize) as --look-w/--look-h. -->
+    <div id="stickR" class="stick"></div>
+    <!-- FIRE — its own control, not a stick gesture (the right stick turns the camera now). Held
+         down = shooting. Its position is a setting: it is dragged directly while the settings panel
+         is open (settingsPanel.ts adds `.placing`, which lifts it above the panel), and the stored
+         insets are written as --fire-rx / --fire-ry. -->
+    <button id="fireBtn" class="fire-btn" type="button" title="开火">开火</button>
     <!-- Throwable / healing slots. Two buttons, used directly; render.ts hides each one while its
          slot is EMPTY (user requirement) and dims it while on cooldown. Positioned just above the
          right stick through the stick CSS variables, so it clears the thumb in both orientations. -->

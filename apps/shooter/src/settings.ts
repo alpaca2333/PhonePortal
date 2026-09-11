@@ -7,8 +7,10 @@
 // tracking `min(96px, 18vh)` instead of being frozen at the size of one phone).
 //
 // Six groups, each stored per orientation (`shooter.<group>.<portrait|landscape>`):
-//   - `stick`  → 操控: the joystick size/position (geometry math lives in ./stick.ts)
-//   - `camera` → 画面: the camera height multiplier AND horizontal angle (./camera.ts)
+//   - `stick`  → 操控: the 操控 layout — joystick size/position, the FIRE BUTTON's position, and the
+//                      right-stick camera sensitivity (geometry math lives in ./stick.ts, the yaw
+//                      mapping in ./camera.ts)
+//   - `camera` → 画面: the camera height multiplier AND resting horizontal angle (./camera.ts)
 //   - `vision` → 视野: the occlusion darkness (the overlay lives in ./vision.ts)
 //   - `light`  → 光照: the ambient + directional multipliers (the lights live in ./lighting.ts)
 //   - `fog`    → 雾:   the height-fog density (the fog lives in ./fog.ts)
@@ -17,8 +19,8 @@
 // rotating the phone switches to the other direction's values instead of overwriting them.
 import {
   CAMERA_SCALE_DEFAULT, CAMERA_SCALE_MAX, CAMERA_SCALE_MIN, CAMERA_SCALE_STEP,
-  CAMERA_YAW_DEFAULT, CAMERA_YAW_MAX, CAMERA_YAW_MIN, CAMERA_YAW_STEP, clampCameraScale,
-  clampCameraYaw,
+  CAMERA_YAW_DEFAULT, CAMERA_YAW_MAX, CAMERA_YAW_MIN, CAMERA_YAW_STEP, YAW_SCALE_DEFAULT,
+  YAW_SCALE_MAX, YAW_SCALE_MIN, YAW_SCALE_STEP, clampCameraScale, clampCameraYaw, clampYawScale,
 } from './camera.js';
 // Same pattern as camera.ts: the vision module owns the darkness numbers, so the slider range, the
 // built-in default and the clamp can never drift from what the overlay actually does.
@@ -60,6 +62,13 @@ export interface StickLayout {
   leftX: number; leftY: number;
   /** Right stick: distance from the right edge / from the bottom edge. */
   rightX: number; rightY: number;
+  /** Fire button: distance from the right edge / from the bottom edge (dragged in the 操控 page). */
+  fireX: number; fireY: number;
+  /**
+   * 「摄像机灵敏度」: camera yaw in degrees at FULL right-stick deflection (see camera.ts).
+   * It lives in the 操控 group because it is a property of the input, not of the framing.
+   */
+  yawScaleDeg: number;
 }
 
 /** Group name in the stored scope for the 操控 settings. */
@@ -67,15 +76,58 @@ export const STICK_GROUP = 'stick';
 /** Group name in the stored scope for the 画面 settings. */
 export const CAMERA_GROUP = 'camera';
 
-export const STICK_KEYS = ['sizePx', 'leftX', 'leftY', 'rightX', 'rightY'] as const;
+/**
+ * On-screen size of the fire button in CSS px. It is duplicated as the fallback of `--fire-size` in
+ * styles.css (which is the single place the look is defined) and exists here because the layout
+ * CLAMP needs it: a fire button whose inset can exceed the viewport would be dragged off-screen.
+ */
+export const FIRE_BTN_SIZE_PX = 84;
+
+// ---------------------------------------------------------------------------
+// The RIGHT stick is a LOOK PAD, not a joystick: a large transparent rectangle
+// ---------------------------------------------------------------------------
+// It is the camera's touch area, so "big" is the whole point — and its size is deliberately derived
+// from the VIEWPORT rather than from `sizePx`. Scaling it with the stick slider would make it 115px
+// tall in landscape (where sizePx is 72), which is not a look area, it is a button; and the left
+// stick's diameter and the right control's reach are not the same design decision any more.
+//
+// The fractions are the tuning knobs (they are also what the 操控 page shows in its hint), and the
+// floors stop a very small viewport from producing a pad too small to aim with. `clampLayout` uses
+// the same function to cap the right insets, so the pad can never be pushed off screen.
+export const LOOK_PAD_W_FRAC = 0.46;   // of viewport width
+export const LOOK_PAD_H_FRAC = 0.42;   // of viewport height
+export const LOOK_PAD_W_MIN = 200;
+export const LOOK_PAD_H_MIN = 160;
+
+/** The look pad's size in CSS px for a viewport (never larger than the viewport itself). */
+export function lookPadSize(vp: Viewport): { w: number; h: number } {
+  const w = Math.max(1, Math.min(vp.width, Math.max(LOOK_PAD_W_MIN, Math.round(vp.width * LOOK_PAD_W_FRAC))));
+  const h = Math.max(1, Math.min(vp.height, Math.max(LOOK_PAD_H_MIN, Math.round(vp.height * LOOK_PAD_H_FRAC))));
+  return { w, h };
+}
+
+export const STICK_KEYS = [
+  'sizePx', 'leftX', 'leftY', 'rightX', 'rightY', 'fireX', 'fireY', 'yawScaleDeg',
+] as const;
 export type StickKey = (typeof STICK_KEYS)[number];
 
-export const LIMITS: Record<StickKey, { min: number; max: number; step: number }> = {
+/**
+ * The 操控 keys exposed as SLIDERS. `fireX`/`fireY` are deliberately absent: the fire button's
+ * position is DRAGGED, so its only bound is the VIEWPORT (see `clampLayout`) — there is no slider
+ * whose range could cap it, and inventing one would be a second, wrong limit.
+ */
+export const STICK_SLIDER_KEYS = [
+  'sizePx', 'leftX', 'leftY', 'rightX', 'rightY', 'yawScaleDeg',
+] as const;
+export type StickSliderKey = (typeof STICK_SLIDER_KEYS)[number];
+
+export const LIMITS: Record<StickSliderKey, { min: number; max: number; step: number }> = {
   sizePx: { min: 48, max: 240, step: 2 },
   leftX: { min: 0, max: 160, step: 1 },
   leftY: { min: 0, max: 160, step: 1 },
   rightX: { min: 0, max: 160, step: 1 },
   rightY: { min: 0, max: 160, step: 1 },
+  yawScaleDeg: { min: YAW_SCALE_MIN, max: YAW_SCALE_MAX, step: YAW_SCALE_STEP },
 };
 
 /** The whole scope value as stored on the server. Unknown keys are preserved verbatim on save. */
@@ -100,9 +152,29 @@ const clamp = (v: number, lo: number, hi: number): number => (v < lo ? lo : v > 
  */
 export function defaultsFor(o: Orientation, vp: Viewport): StickLayout {
   if (o === 'landscape') {
-    return { sizePx: Math.round(Math.min(96, 0.18 * vp.height)), leftX: 8, leftY: 8, rightX: 8, rightY: 8 };
+    return {
+      sizePx: Math.round(Math.min(96, 0.18 * vp.height)), leftX: 8, leftY: 8, rightX: 8, rightY: 8,
+      ...fireDefaults(8, 8, Math.round(Math.min(96, 0.18 * vp.height))),
+    };
   }
-  return { sizePx: 148, leftX: 26, leftY: 26, rightX: 26, rightY: 26 };
+  return {
+    sizePx: 148, leftX: 26, leftY: 26, rightX: 26, rightY: 26,
+    ...fireDefaults(26, 26, 148),
+  };
+}
+
+/**
+ * Where the fire button starts, given the LEFT stick's corner insets and size.
+ *
+ * ABOVE THE LEFT STICK, and that is a deliberate rejection of the obvious spot above the RIGHT one:
+ * the right stick now owns the camera (the thumb lives there permanently), and directly above it sit
+ * the throwable/healing buttons, with the gear below-centre and the backpack button above that. The
+ * left corner's upper half is the one region that is empty in BOTH orientations at every stick size,
+ * so the default can never be born overlapping another control — and it is one drag away from
+ * anywhere else. `yawScaleDeg` is the camera sensitivity (see camera.ts).
+ */
+function fireDefaults(leftX: number, leftY: number, sizePx: number): Pick<StickLayout, 'fireX' | 'fireY' | 'yawScaleDeg'> {
+  return { fireX: leftX, fireY: leftY + sizePx + 14, yawScaleDeg: YAW_SCALE_DEFAULT };
 }
 
 /** Keep a layout on screen and inside the slider ranges (also used for hand-edited files). */
@@ -113,12 +185,25 @@ export function clampLayout(layout: StickLayout, vp: Viewport): StickLayout {
   const sizePx = Math.round(clamp(layout.sizePx, LIMITS.sizePx.min, maxSize));
   const maxX = Math.min(LIMITS.leftX.max, Math.max(0, vp.width - sizePx));
   const maxY = Math.min(LIMITS.leftY.max, Math.max(0, vp.height - sizePx));
+  // The fire button is clamped against ITS OWN size, so dragging it into a corner keeps the whole
+  // button on screen rather than half of it hanging off the edge.
+  const fireMaxX = Math.max(0, vp.width - FIRE_BTN_SIZE_PX);
+  const fireMaxY = Math.max(0, vp.height - FIRE_BTN_SIZE_PX);
+  // The right stick is a LOOK PAD, so its caps come from the PAD's size (settings.ts::lookPadSize)
+  // rather than the left stick's diameter — otherwise a 200x365 pad could be given an inset that
+  // pushes a third of it off screen.
+  const pad = lookPadSize(vp);
+  const rightMaxX = Math.min(LIMITS.rightX.max, Math.max(0, vp.width - pad.w));
+  const rightMaxY = Math.min(LIMITS.rightY.max, Math.max(0, vp.height - pad.h));
   return {
     sizePx,
     leftX: Math.round(clamp(layout.leftX, 0, maxX)),
-    rightX: Math.round(clamp(layout.rightX, 0, maxX)),
+    rightX: Math.round(clamp(layout.rightX, 0, rightMaxX)),
     leftY: Math.round(clamp(layout.leftY, 0, maxY)),
-    rightY: Math.round(clamp(layout.rightY, 0, maxY)),
+    rightY: Math.round(clamp(layout.rightY, 0, rightMaxY)),
+    fireX: Math.round(clamp(layout.fireX, 0, fireMaxX)),
+    fireY: Math.round(clamp(layout.fireY, 0, fireMaxY)),
+    yawScaleDeg: Math.round(clampYawScale(layout.yawScaleDeg) / LIMITS.yawScaleDeg.step) * LIMITS.yawScaleDeg.step,
   };
 }
 
@@ -165,6 +250,11 @@ export function effectiveFor(raw: RawSettings, o: Orientation, vp: Viewport): St
     const v = over[k];
     if (v !== undefined) base[k] = v;
   }
+  // The fire button's DEFAULT tracks the (possibly overridden) left stick, so a player who only ever
+  // enlarged the stick cannot end up with the button sitting on top of it. An explicit fireX/fireY
+  // override always wins, and `clampLayout` still keeps the result on screen.
+  if (over.fireX === undefined) base.fireX = base.leftX;
+  if (over.fireY === undefined) base.fireY = base.leftY + base.sizePx + 14;
   return clampLayout(base, vp);
 }
 
