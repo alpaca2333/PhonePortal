@@ -1,0 +1,17 @@
+{
+  "name": "mobile-portal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A mobile-local portal that hosts independent sub-applications, written in TypeScript.",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "node dist/server/src/index.js",
+    "dev": "node scripts/dev-serve.mjs",
+    "launch": "npm run build && node dist/server/src/index.js"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "typescript": "~5.8.0"
+  }
+}

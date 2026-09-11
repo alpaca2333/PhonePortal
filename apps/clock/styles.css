@@ -1,0 +1,27 @@
+:root {
+  --bg: #0d1220; --fg: #eef2ff; --muted: #8a93ad;
+  --accent: #4f6ff7; --card: #151b2e;
+  --radius: 18px; --shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  --safe-top: env(safe-area-inset-top, 0px); --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--fg); font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; -webkit-text-size-adjust: 100%; }
+body { background: radial-gradient(800px 500px at 50% -20%, rgba(79,111,247,0.25), transparent 60%), var(--bg); min-height: 100vh; }
+#app { padding: calc(24px + var(--safe-top)) 20px calc(28px + var(--safe-bottom)); max-width: 520px; margin: 0 auto; }
+header h1 { margin: 0; font-size: 22px; }
+header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+
+.clock-card { text-align: center; background: var(--card); border-radius: var(--radius); padding: 30px 20px 24px; margin-top: 18px; box-shadow: var(--shadow); }
+.clock-time { font-size: 62px; font-weight: 800; letter-spacing: 2px; font-variant-numeric: tabular-nums; line-height: 1; }
+.clock-date { margin-top: 12px; color: var(--muted); font-size: 15px; }
+.clock-week { display: inline-block; margin-top: 14px; font-size: 13px; color: var(--fg); background: rgba(79,111,247,0.18); padding: 6px 14px; border-radius: 999px; }
+
+.stop { background: var(--card); border-radius: var(--radius); padding: 22px 20px; margin-top: 16px; box-shadow: var(--shadow); }
+.stop h2 { margin: 0 0 14px; font-size: 15px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+.sw-display { text-align: center; font-size: 46px; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: 1px; }
+.sw-controls { display: flex; gap: 12px; margin-top: 18px; }
+.sw-controls button { flex: 1; border: none; border-radius: 14px; padding: 14px; font-size: 15px; font-weight: 700; cursor: pointer; }
+#swStart { background: var(--accent); color: #fff; }
+#swReset { background: var(--card); color: var(--muted); border: 1px solid rgba(255,255,255,0.08); }
+.laps { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; max-height: 200px; overflow: auto; }
+.lap { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); background: var(--bg); border-radius: 10px; padding: 8px 12px; font-variant-numeric: tabular-nums; }

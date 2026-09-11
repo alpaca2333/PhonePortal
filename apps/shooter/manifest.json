@@ -1,0 +1,9 @@
+{
+  "id": "shooter",
+  "name": "射击竞技场",
+  "description": "俯视角双摇杆射击：室内掩体对射 + 视野遮挡 + 背包/备弹/护甲等级（1–6），消灭一波波拿枪的敌人",
+  "icon": "🎯",
+  "color": "#40c4ff",
+  "order": 5,
+  "orientation": "landscape"
+}

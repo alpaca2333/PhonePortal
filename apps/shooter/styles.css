@@ -1,0 +1,266 @@
+:root{
+  --accent:#40c4ff;
+  --danger:#ff5a5a;
+  --hp:#4caf50;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none;touch-action:none}
+html,body{height:100%;overflow:hidden;background:#0b0e14;color:#e6edf3;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+#stage{position:fixed;inset:0;overflow:hidden}
+#game{position:absolute;inset:0;width:100%;height:100%;display:block}
+.hidden{display:none!important}
+
+/* HUD */
+/* z-index 7 > .stick (6): #hud is pointer-events:none, so raising it cannot steal stick input,
+   but it guarantees #weaponBtn (the only pointer-events:auto child) stays tappable no matter how
+   large / where the user moves the joysticks. */
+#hud{position:absolute;top:0;left:0;right:0;padding:calc(env(safe-area-inset-top) + 10px) 14px 0;display:flex;align-items:center;justify-content:space-between;gap:14px;pointer-events:none;z-index:7}
+/* Left group grows; the right group is a separate flex item so the FPS badge lands flush in
+   the top-right corner. Do NOT collapse this into one row with `margin-left:auto`: #bar is
+   `flex:1`, and auto margins are resolved against free space, which makes the HP bar's width
+   depend on margin resolution order (it can collapse to 0). */
+#hudLeft{flex:1;min-width:0;display:flex;align-items:center;gap:14px}
+/* `center`, not `baseline`: #ammo is a two-row column (count above bar), and baseline alignment
+   would line its first row up with the score's baseline and push the bar out of the row. */
+#hudRight{flex:none;display:flex;align-items:center;gap:12px}
+#bar{flex:1;max-width:46%;height:16px;background:rgba(255,255,255,.14);border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,.18)}
+#hpfill{height:100%;width:100%;background:linear-gradient(90deg,#4caf50,#8bc34a);transition:width .12s ease}
+#wave{font-weight:700;color:var(--accent);font-size:16px;text-shadow:0 1px 2px #000;white-space:nowrap}
+#score{font-variant-numeric:tabular-nums;font-weight:700;font-size:18px;text-shadow:0 1px 2px #000}
+#score::before{content:'⚔ ';opacity:.7}
+/* weapon switcher — #hud is pointer-events:none, so this child opts back in (same trick as the
+   restart button in #overlay). Tap target is deliberately chip-sized: the HUD row is short in
+   landscape and the bottom centre is already taken by the ⚙ button and the sticks. */
+#weaponBtn{pointer-events:auto;touch-action:none;cursor:pointer;font-family:inherit;font-weight:700;font-size:12px;line-height:1;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;min-height:28px;padding:6px 12px;border-radius:999px;border:1px solid rgba(255,255,255,.2);background:rgba(12,16,24,.6);color:#cfe3f5;text-shadow:0 1px 2px #000}
+#weaponBtn:active{background:rgba(64,196,255,.25)}
+#ammo{display:flex;flex-direction:column;align-items:flex-end;gap:2px}
+#ammoCount{font-variant-numeric:tabular-nums;font-weight:700;font-size:13px;text-shadow:0 1px 2px #000;white-space:nowrap}
+#ammoBar{display:block;width:44px;height:3px;border-radius:2px;background:rgba(255,255,255,.18);overflow:hidden}
+#ammoFill{display:block;height:100%;width:100%;background:var(--accent)}
+#ammo.reloading #ammoCount{color:var(--accent)}
+#fps{font-variant-numeric:tabular-nums;font-size:13px;font-weight:600;opacity:.62;letter-spacing:.4px;text-shadow:0 1px 2px #000;white-space:nowrap}
+
+/* ---------------------------------------------------------------------------------------------
+   Hitch profiler readout (`?diag=1` — src/diag.ts). Appended as the last child of #hudRight, i.e.
+   NEXT TO the existing FPS readout in the one corner that is already the app's performance
+   readout — so it never fights the sticks (bottom corners), the health/wave HUD (top left) or the
+   gear/backpack buttons (bottom centre). Both elements are created by diag.ts and only exist when
+   the profiler is on, so the cost when it is off is zero.
+   #hud is `pointer-events:none`, so the badge re-enables its own pointer events to be tappable —
+   pointerdown, not click (see weaponButton.ts for the two-finger trap this app hit for real).
+   #diagPanel anchors to #hud (the nearest positioned ancestor), not to #hudRight (a plain flex row),
+   which is why it opens as a top-right card over the HUD rather than inside the row.
+   --------------------------------------------------------------------------------------------- */
+#diagBadge{flex:none;pointer-events:auto;cursor:pointer;font-variant-numeric:tabular-nums;font-size:11px;font-weight:600;
+  color:#ffd479;opacity:.85;text-shadow:0 1px 2px #000;user-select:none;-webkit-user-select:none;
+  display:flex;flex-direction:column;align-items:flex-end;gap:1px;text-align:right}
+#diagFps{white-space:nowrap}
+/* The resolution chain (postfx.ts::resolutionText): the second line of the same readout, so it shares
+   the tap target and the reserved top-right box. It WRAPS (a 60-character line would otherwise squeeze
+   #hudLeft's flex:1 health bar), and its type is `em` so the landscape override above scales it too. */
+#diagRes{font-size:.86em;color:#9fd8b4;opacity:.9;white-space:normal;max-width:min(64vw,320px);line-height:1.3;
+  -webkit-user-select:text;user-select:text}
+#diagPanel{position:absolute;top:calc(env(safe-area-inset-top) + 8px);right:8px;z-index:9;pointer-events:auto;
+  max-width:min(78vw,420px);max-height:44vh;overflow:auto;padding:7px 9px;border-radius:8px;
+  background:rgba(5,8,12,.88);border:1px solid rgba(255,212,121,.3);color:#e8f1f6;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;line-height:1.5;
+  white-space:nowrap;-webkit-user-select:text;user-select:text}
+#diagPanel.hidden{display:none}
+
+/* ---------------------------------------------------------------------------------------------
+   Armour readout + ammo level badge + the two action buttons (throwable / healing).
+   The LEVEL COLOUR is the shared 1..6 palette (armor.ts::LEVEL_COLORS: white/green/blue/purple/
+   gold/red) and it is always written through the `--lv` custom property by render.ts or
+   inventoryPanel.ts — never hard-coded here, so a level can never render in the wrong colour.
+   --------------------------------------------------------------------------------------------- */
+#armorBox{flex:none;display:flex;flex-direction:column;align-items:flex-start;gap:3px}
+#armorChip{font-size:11.5px;font-weight:700;white-space:nowrap;color:#9fb4c7;text-shadow:0 1px 2px #000}
+#armorBar{display:block;width:46px;height:3px;border-radius:2px;background:rgba(255,255,255,.18);overflow:hidden}
+#armorFill{display:block;height:100%;width:100%;background:#9fb4c7}
+/* Ammo level badge: pill outlined in the level colour (the same language as the enemy armour bar). */
+#ammoLevel{font-size:10px;font-weight:700;line-height:1;padding:2px 6px;border-radius:999px;border:1px solid currentColor;white-space:nowrap;text-shadow:0 1px 2px #000}
+/* The weapon button dims when there is no second weapon to switch to (only one weapon slot filled). */
+#weaponBtn.solo{opacity:.55}
+
+/* Action buttons: vertical stack ABOVE the right stick. Positioned through the same CSS variables
+   the stick layout setting writes, so they clear the thumb in any orientation / any stick size —
+   and they sit outside #hud so their own z-index is independent of the top row. */
+#actionBtns{position:absolute;right:max(var(--stick-rx,26px),env(safe-area-inset-right));bottom:calc(max(var(--stick-ry,26px),env(safe-area-inset-bottom)) + var(--stick-size,148px) + 10px);display:flex;flex-direction:column;align-items:flex-end;gap:8px;z-index:7;pointer-events:none}
+.act-btn{pointer-events:auto;touch-action:none;cursor:pointer;font-family:inherit;font-weight:700;font-size:12px;line-height:1;white-space:nowrap;display:inline-flex;align-items:center;min-height:30px;padding:6px 12px;border-radius:999px;border:1px solid rgba(255,255,255,.22);border-left:4px solid var(--lv,#9fb4c7);background:rgba(12,16,24,.66);color:#e6edf3;text-shadow:0 1px 2px #000}
+.act-btn:active{background:rgba(64,196,255,.25)}
+/* On cooldown: still visible (hiding it would make the HUD jump) but clearly not usable. */
+.act-btn.cd{opacity:.45}
+
+/* Bag button: centred, just ABOVE the gear. The bottom centre is the only screen area free in both
+   orientations, but the gear already owns the exact centre and the two sticks leave only ~52px of
+   horizontal room in portrait — so the second button goes higher, not sideways. */
+.inv-btn{position:absolute;left:50%;bottom:calc(max(14px,env(safe-area-inset-bottom)) + 46px);transform:translateX(-50%);width:38px;height:38px;border-radius:50%;border:1px solid rgba(255,255,255,.2);background:rgba(12,16,24,.6);color:#cfe3f5;font-size:17px;line-height:1;z-index:25;cursor:pointer;opacity:.72;display:flex;align-items:center;justify-content:center;touch-action:none}
+.inv-btn.on{opacity:1;background:var(--accent);color:#04202e;border-color:transparent}
+
+/* Backpack panel. Top-anchored and height-capped like the settings panel, so the sticks stay
+   reachable below it. SCROLLING CAVEAT: the global `*{touch-action:none}` also hits every child, and
+   a pan needs the touched element AND all its ancestors to allow it — hence the `*` rule below. The
+   GRID then opts back out (`touch-action:none`), because a pan there would steal the item drag.
+
+   SQUARE CELLS, AND WHY THE PANEL WIDTH IS DERIVED: the cells used to be 104x44 wide rectangles
+   because the panel was a fixed 680px. Now the panel is exactly as wide as the grid needs
+   (`--inv-cell * 5 + gaps + padding + border`), and each cell is `aspect-ratio:1` — so a cell is
+   square at any width, and narrowing the panel is the ONE knob that shrinks them. On a viewport too
+   narrow for the target size the `min()` caps the panel, the columns share the space and the cells
+   stay square (just smaller). */
+.inv-panel{--inv-cell:46px;--inv-gap:5px;position:absolute;left:50%;transform:translateX(-50%);top:calc(env(safe-area-inset-top) + 34px);width:min(calc(var(--inv-cell) * 5 + var(--inv-gap) * 4 + 22px),calc(100% - 20px));max-height:min(64vh,320px);overflow-y:auto;z-index:30;background:rgba(10,14,20,.95);border:1px solid rgba(255,255,255,.12);border-radius:12px;box-shadow:0 12px 34px rgba(0,0,0,.55);padding:8px 10px 10px;touch-action:pan-y;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+.inv-panel *{touch-action:pan-y}
+.inv-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.inv-title{font-size:13px;font-weight:700;letter-spacing:.3px}
+.inv-badge{font-size:10px;padding:1px 7px;border-radius:999px;background:rgba(64,196,255,.18);color:var(--accent);white-space:nowrap}
+.inv-close{margin-left:auto;width:24px;height:24px;border-radius:50%;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.06);color:#cfe3f5;font-size:12px;cursor:pointer;flex:none}
+.inv-slots{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:var(--inv-gap);margin-bottom:8px}
+.inv-slotbox{display:flex;flex-direction:column;gap:2px;min-width:0}
+.inv-cap{font-size:9px;opacity:.6;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.inv-bagwrap{display:flex;flex-direction:column;gap:4px}
+.inv-sec{font-size:10.5px;font-weight:700;letter-spacing:.4px;opacity:.85}
+/* `touch-action:none` HERE, not pan-y: a vertical pan would otherwise be stolen by the scroll
+   container instead of starting an item drag. */
+.inv-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:var(--inv-gap);touch-action:none}
+.inv-cell{position:relative;display:flex;flex-direction:column;justify-content:space-between;gap:1px;width:100%;aspect-ratio:1 / 1;min-height:0;padding:3px 4px;border-radius:7px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-left:3px solid var(--lv,#9fb4c7);overflow:hidden;cursor:grab}
+.inv-cell.empty{opacity:.45;border-left-color:rgba(255,255,255,.18);cursor:default}
+.inv-cell.sel{outline:2px solid var(--accent);outline-offset:1px}
+.inv-cell.hot{outline:2px solid #7dffa8;outline-offset:1px;background:rgba(125,255,168,.14)}
+/* The cell is the ONLY hit target in the backpack: its spans must not swallow the browser's own hit
+   test (a drop landed on .inv-nm instead of the cell and was silently ignored — see
+   inventoryPanel.ts::refUnder, which also walks up to [data-ref] so this is belt and braces). */
+.inv-cell > *{pointer-events:none}
+.inv-lv{font-size:8px;font-weight:700;color:var(--lv,#9fb4c7);letter-spacing:.3px}
+.inv-nm{font-size:10px;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.inv-ct{font-size:9px;opacity:.78;font-variant-numeric:tabular-nums;text-align:right}
+.inv-foot{margin-top:7px;font-size:10px;line-height:1.4;opacity:.58}
+/* The floating drag ghost. `pointer-events:none` is LOAD-BEARING: the drop target is resolved with
+   document.elementFromPoint(), so the ghost must never be the element under the finger. */
+.inv-ghost{position:fixed;left:0;top:0;transform:translate(-50%,-50%);pointer-events:none;z-index:40;max-width:150px;padding:4px 8px;border-radius:7px;background:rgba(10,14,20,.92);border:1px solid var(--accent);color:#e6edf3;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 6px 18px rgba(0,0,0,.5)}
+
+/* joysticks — geometry is a USER SETTING, applied as CSS variables on :root by
+   settingsPanel.ts (--stick-size / --stick-lx / --stick-ly / --stick-rx / --stick-ry).
+   The var() fallbacks reproduce the old portrait defaults, so the sticks stay usable if the
+   script never runs. input.ts measures the rendered element and derives knob travel from it, so
+   any size / any position stays playable. */
+.stick{position:absolute;width:var(--stick-size,148px);height:var(--stick-size,148px);border-radius:50%;background:rgba(255,255,255,.07);border:2px solid rgba(255,255,255,.16);z-index:6;touch-action:none}
+#stickL{left:max(var(--stick-lx,26px),env(safe-area-inset-left));bottom:max(var(--stick-ly,26px),env(safe-area-inset-bottom))}
+#stickR{right:max(var(--stick-rx,26px),env(safe-area-inset-right));bottom:max(var(--stick-ry,26px),env(safe-area-inset-bottom))}
+.knob{position:absolute;left:50%;top:50%;width:44%;height:44%;border-radius:50%;transform:translate(-50%,-50%);background:radial-gradient(circle at 30% 30%, rgba(255,255,255,.55), rgba(255,255,255,.25) 60%, rgba(255,255,255,.1));box-shadow:0 2px 8px rgba(0,0,0,.4)}
+#stickR .knob{background:radial-gradient(circle at 30% 30%, rgba(64,196,255,.8), rgba(64,196,255,.35) 60%, rgba(64,196,255,.15))}
+.stick .label{position:absolute;left:0;right:0;top:-24px;text-align:center;font-size:12px;opacity:.55;letter-spacing:.5px}
+
+/* settings entry — bottom centre: the only spot free in both orientations (sticks own the
+   corners, the HUD the top, and the shell's「退出横屏」pill the top centre in landscape). */
+.gear-btn{position:absolute;left:50%;bottom:max(14px,env(safe-area-inset-bottom));transform:translateX(-50%);width:38px;height:38px;border-radius:50%;border:1px solid rgba(255,255,255,.2);background:rgba(12,16,24,.6);color:#cfe3f5;font-size:17px;line-height:1;z-index:25;cursor:pointer;opacity:.72;display:flex;align-items:center;justify-content:center;touch-action:none}
+.gear-btn.on{opacity:1;background:var(--accent);color:#04202e;border-color:transparent}
+
+/* settings panel — FULL SCREEN (the request), laid out as a fixed header + a fixed tab strip + ONE
+   scrolling body, so the ✕ (top-left) and the page tabs never move while the values scroll.
+
+   SCROLLING IS LOAD-BEARING: the global `*{touch-action:none}` (line 6) also hits every child, and a
+   pan is only allowed when the touched element AND its ancestors allow it — so the descendants must be
+   re-enabled too, or the list cannot be scrolled by touch (only the panel's own padding would pan).
+   Sliders opt back out so a horizontal drag adjusts them.
+
+   `[hidden]` needs its own rule for BOTH the panel and the pages: the UA stylesheet's
+   `[hidden]{display:none}` loses to ANY author `display`, and these two set one.
+
+   z-index 32 sits above the backpack panel (30) and the gear (25): a full-screen panel covering them
+   is the direct consequence of 「关闭按钮锚定在左上角不滚动」 — the ✕ is the way out, and it is the first
+   child of the fixed header. */
+.settings-panel{position:absolute;inset:0;display:flex;flex-direction:column;z-index:32;background:rgba(8,11,16,.96);padding:calc(env(safe-area-inset-top) + 8px) max(12px,env(safe-area-inset-right)) calc(env(safe-area-inset-bottom) + 8px) max(12px,env(safe-area-inset-left));overflow:hidden}
+.settings-panel[hidden]{display:none}
+.set-head{flex:none;display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.set-close{flex:none;width:30px;height:30px;border-radius:50%;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.06);color:#cfe3f5;font-size:14px;cursor:pointer;touch-action:none}
+.set-title{font-size:14px;font-weight:700;letter-spacing:.3px}
+.set-badge{font-size:11px;padding:2px 8px;border-radius:999px;background:rgba(64,196,255,.18);color:var(--accent);white-space:nowrap}
+/* The save status lives in the header, i.e. OUTSIDE the scrolling body: it used to be a footer, which
+   would scroll away in a full-screen panel exactly when it has something to say. */
+.set-status{margin-left:auto;font-size:11px;opacity:.6;text-align:right}
+.set-status.error{color:#ff8a8a;opacity:.9}
+/* One tab per group = one page. The strip is fixed too, so switching pages never needs a scroll. */
+.set-tabs{flex:none;display:flex;gap:6px;margin-bottom:8px;overflow-x:auto;touch-action:pan-x;overscroll-behavior-x:contain}
+.set-tab{flex:1 0 auto;font-family:inherit;font-size:12px;font-weight:700;letter-spacing:.3px;padding:7px 10px;border-radius:9px;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.05);color:#cfe3f5;cursor:pointer;touch-action:pan-x;white-space:nowrap}
+.set-tab.on{background:var(--accent);color:#04202e;border-color:transparent}
+/* THE one scrolling region. Everything above it (✕, title, status, tabs) is `flex:none`. */
+.set-body{flex:1;min-height:0;overflow-y:auto;touch-action:pan-y;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+.set-body *{touch-action:pan-y}
+.set-hint{margin:0 0 8px;font-size:11px;opacity:.6;line-height:1.4}
+.set-warn{margin:0 0 8px;font-size:11px;line-height:1.4;color:#ffb86b}
+/* A page is one group's worth of rows. `max-width` keeps a tablet/landscape panel from stretching a
+   slider to an absurd length (the type is the same in both orientations — see the landscape block). */
+.set-page{display:flex;flex-direction:column;gap:4px;width:100%;max-width:720px;margin:0 auto}
+.set-page[hidden]{display:none}
+.set-rows{display:flex;flex-direction:column;gap:2px}
+/* Group caption rows (操控 / 画面 / …): a small caption plus that group's own 恢复默认 button. Each
+   group resets independently — one footer button could not express "reset only the camera". */
+.set-group{display:flex;align-items:center;gap:8px;margin:0 0 2px;font-size:11px;font-weight:700;letter-spacing:.4px;opacity:.9}
+.set-group-name{white-space:nowrap}
+.set-group-reset{margin-left:auto;font-size:11px;padding:3px 10px}
+.set-row{display:flex;align-items:center;gap:10px;height:34px;font-size:12px}
+.set-name{flex:0 0 132px;opacity:.85;white-space:nowrap}
+.set-range{flex:1;min-width:80px;height:24px;accent-color:var(--accent);touch-action:none}
+.set-val{flex:0 0 56px;text-align:right;font-variant-numeric:tabular-nums;opacity:.75}
+/* 操控: TWO sliders per row (the request). A full-width row wastes half the panel on an inset, but a
+   half-width INLINE row would squeeze the range to nothing (a 132px label + a 56px readout leave
+   almost nothing of a ~180px cell) — so in this variant the label takes its own line and the range
+   shares the second one with the readout. */
+.set-rows.two-col{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 12px}
+.set-rows.two-col .set-row{display:grid;grid-template-columns:1fr auto;grid-template-areas:"name name" "range val";height:auto;align-items:center;column-gap:8px;row-gap:2px}
+.set-rows.two-col .set-name{grid-area:name;flex:none;font-size:11px}
+.set-rows.two-col .set-range{grid-area:range;width:100%}
+.set-rows.two-col .set-val{grid-area:val;flex:none;font-size:11px}
+.set-reset{font-family:inherit;font-size:12px;padding:5px 12px;border-radius:999px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:#e6edf3;cursor:pointer;touch-action:none}
+.set-reset:disabled{opacity:.4;cursor:default}
+
+/* landscape: short viewport -> smaller sticks, tighter margins, slimmer HUD.
+   NOTE: stick size/position are NOT set here any more — they are settings (defaults for
+   landscape are computed in src/settings.ts: min(96px, 18vh) with 8px insets). */
+@media (orientation:landscape){
+  .knob{width:40%;height:40%}
+  #hud{padding:calc(env(safe-area-inset-top) + 2px) max(6px,env(safe-area-inset-right)) 0 max(6px,env(safe-area-inset-left));gap:8px}
+  #hudLeft{gap:8px}
+  #hudRight{gap:8px}
+  #bar{height:9px;max-width:24%}
+  #wave{font-size:11px}
+  #score{font-size:12.5px}
+  #weaponBtn{font-size:10.5px;padding:4px 10px;min-height:24px}
+  #ammoCount{font-size:10.5px}
+  #ammoBar{width:32px;height:2px}
+  #fps{font-size:9.5px}
+  /* the profiler readout shrinks with the rest of the HUD (~400px tall viewport) */
+  #diagBadge{font-size:9.5px}
+  #diagPanel{font-size:9.5px;max-height:38vh}
+  /* NOTE there are deliberately NO `.settings-panel` / `.set-*` overrides here any more: the panel is
+     full screen and its type is identical in both orientations (the request). What remains in this
+     block is the in-game HUD, which really does need to be slimmer in a ~400px tall viewport. */
+  .gear-btn{width:30px;height:30px;font-size:13px;bottom:max(6px,env(safe-area-inset-bottom));opacity:.6}
+  /* game-over overlay: 34px/18px is sized for portrait; in a ~400px tall viewport it dominates */
+  #overlay{gap:10px}
+  #overlay h2{font-size:24px}
+  #overlay p{font-size:14px}
+  #overlay button{font-size:15px;padding:8px 24px}
+  /* armour / ammo level / action buttons / backpack — one notch slimmer, like the rest of the HUD */
+  #armorChip{font-size:9.5px}
+  #armorBar{width:34px;height:2px}
+  #ammoLevel{font-size:9px;padding:1px 5px}
+  .act-btn{font-size:10.5px;min-height:26px;padding:4px 10px;border-left-width:3px}
+  .inv-btn{width:30px;height:30px;font-size:13px;bottom:calc(max(6px,env(safe-area-inset-bottom)) + 40px);opacity:.6}
+  /* smaller squares in landscape: the ONE knob is --inv-cell (the panel width is derived from it) */
+  .inv-panel{--inv-cell:40px;top:calc(env(safe-area-inset-top) + 22px);max-height:min(56vh,240px);padding:6px 9px 8px}
+  .inv-title{font-size:12px}
+  .inv-badge{font-size:9.5px}
+  .inv-sec{font-size:10px}
+  .inv-cell{padding:2px 3px;border-left-width:2px}
+  .inv-nm{font-size:9.5px}
+  .inv-lv{font-size:7.5px}
+  .inv-ct{font-size:8.5px}
+  .inv-cap{font-size:8.5px}
+  .inv-foot{font-size:9px}
+}
+
+/* overlay */
+#overlay{position:absolute;inset:0;z-index:20;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;background:rgba(5,8,12,.72);backdrop-filter:blur(4px)}
+#overlay h2{font-size:34px;color:var(--danger);text-shadow:0 2px 10px #000}
+#overlay p{font-size:18px;opacity:.9}
+#overlay button{pointer-events:auto;font-size:18px;font-weight:700;padding:12px 34px;border:0;border-radius:999px;background:var(--accent);color:#04202e;cursor:pointer;box-shadow:0 6px 22px rgba(64,196,255,.4)}

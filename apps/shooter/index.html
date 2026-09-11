@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>射击竞技场</title>
+<link rel="stylesheet" href="./styles.css" />
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js" } }
+</script>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="game"></canvas>
+    <div id="hud">
+      <div id="hudLeft">
+        <div id="bar"><div id="hpfill"></div></div>
+        <!-- Armour: the plate lives in the BACKPACK's armour slot, so this chip is a straight
+             readout of that item (level in the 1..6 colour, current/max value, or 无护甲). -->
+        <div id="armorBox" title="护甲">
+          <span id="armorChip">无护甲</span>
+          <span id="armorBar"><i id="armorFill"></i></span>
+        </div>
+        <div id="wave">第 1 波</div>
+      </div>
+      <div id="hudRight">
+        <div id="score">0</div>
+        <!-- Weapon SLOT switch: primary <-> secondary only (never the throwable/healing slots).
+             This button is also the "what am I holding" readout, so render.ts keeps its text and
+             its visibility in sync with the inventory every frame. Hidden while both weapon slots
+             are empty; dimmed when there is only one weapon to hold. -->
+        <button id="weaponBtn" type="button" title="切换主/副武器">冲锋枪</button>
+        <!-- Ammunition level of the equipped weapon (1 white .. 6 red) — the same colour language
+             as the enemy armour strip, so the two read against each other. -->
+        <span id="ammoLevel" class="hidden">Lv2</span>
+        <div id="ammo">
+          <span id="ammoCount">30/30 · 备弹 300</span>
+          <span id="ammoBar"><i id="ammoFill"></i></span>
+        </div>
+        <div id="fps">-- FPS</div>
+      </div>
+    </div>
+    <div id="stickL" class="stick"><div class="knob"></div></div>
+    <div id="stickR" class="stick"><div class="knob"></div></div>
+    <!-- Throwable / healing slots. Two buttons, used directly; render.ts hides each one while its
+         slot is EMPTY (user requirement) and dims it while on cooldown. Positioned just above the
+         right stick through the stick CSS variables, so it clears the thumb in both orientations. -->
+    <div id="actionBtns">
+      <button id="throwBtn" type="button" class="act-btn hidden" title="投掷物">手雷 ×3</button>
+      <button id="healBtn" type="button" class="act-btn hidden" title="治疗物">急救包 ×3</button>
+    </div>
+    <div id="overlay" class="hidden">
+      <h2>游戏结束</h2>
+      <p id="final"></p>
+      <button id="restart">再来一局</button>
+    </div>
+  </div>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

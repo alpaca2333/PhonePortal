@@ -1,0 +1,8 @@
+{
+  "id": "blackhole",
+  "name": "黑洞",
+  "description": "Schwarzschild 光线追踪：真实引力透镜 + 吸积盘",
+  "icon": "🕳️",
+  "color": "#8a63f7",
+  "order": 4
+}

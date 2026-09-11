@@ -1,0 +1,8 @@
+{
+  "id": "clock",
+  "name": "时钟",
+  "description": "实时时钟与秒表",
+  "icon": "⏰",
+  "color": "#4f6ff7",
+  "order": 2
+}

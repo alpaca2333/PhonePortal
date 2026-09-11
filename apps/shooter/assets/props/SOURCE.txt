@@ -1,0 +1,36 @@
+KayKit / Kenney indoor props used by apps/shooter
+=================================================
+
+SOURCE
+  Kenney - "Furniture Kit" (3D assets)
+  https://kenney.nl/assets/furniture-kit
+  Downloaded: 2025 (zip kenney_furniture-kit.zip, 5.1 MB)
+  Extracted from: Models/GLTF format/*.glb
+
+LICENSE
+  CC0 1.0 Universal (public domain dedication).
+  https://creativecommons.org/publicdomain/zero/1.0/
+  No attribution required, commercial use allowed, redistribution allowed.
+  (Crediting Kenney is not required but is good manners: https://kenney.nl)
+
+WHY THIS KIT
+  - It is a COMPLETE interior kit: floor tiles, walls, corners, doorways AND furniture,
+    so the room shell and the props come from one coherent art set (no style mixing).
+  - Every model is flat-coloured with ZERO textures (verified: no `images` in any glTF),
+    which matches this app's no-texture / vertex-colour + toon-shading pipeline.
+  - The grid is 0.5 units with a 1.29-unit wall, i.e. one Kenney "human" is ~1 unit.
+    This app's characters are 2.0 world units tall, hence PROP_SCALE = 2.2 in src/props.ts.
+
+WHAT IS IN HERE (49 files, ~541 KB total)
+  shell   floorFull wall wallHalf wallCorner wallDoorway wallWindow
+  cover   loungeSofa* loungeDesignSofa bookcaseClosedWide bookcaseOpenLow desk table
+          tableCoffee cabinetTelevision kitchenBar kitchenFridgeLarge washerDryerStacked
+          trashcan cardboardBoxClosed cardboardBoxOpen bedDouble bench stoolBar
+  decor   chair sideTable pottedPlant plantSmall1 plantSmall2 rugRound rugRectangle
+          rugSquare rugDoormat lampRoundFloor lampWall lampRoundTable speaker radio
+          laptop computerScreen televisionModern televisionVintage books pillow
+          coatRack toaster kitchenCoffeeMachine bear
+
+  Sizes are recorded (and asserted against the files on disk) in src/props.ts -> PROPS.
+  Re-download: the zip URL is embedded in kenney.nl's asset page; the file names above are
+  the zip's own names, so a re-download only needs the same subset copied over.

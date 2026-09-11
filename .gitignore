@@ -1,0 +1,33 @@
+# ── 依赖 / 构建产物 ────────────────────────────────────────────────
+node_modules/
+dist/
+dist.next/
+*.tsbuildinfo
+
+# ── 运行时用户数据（设置存储）─────────────────────────────────────
+# 必须留在 dist/ 之外：`npm run build` 会整体替换 dist/（rm dist + rename dist.next dist），
+# 放进去的数据每次保存都会丢。见 AGENTS.md「设置与用户数据」与 docs/TECHNICAL.md 第 4 节。
+data/
+
+# ── 日志 / 环境变量 / 临时文件 ────────────────────────────────────
+*.log
+npm-debug.log*
+.env
+.env.*
+!.env.example
+.trace*.txt
+
+# ── 离线模型预览（scripts/preview-model.mjs 的产物）────────────────
+# 这些 PNG 是随时可重跑的中间产物（挑模型时看一眼形状/朝向），不入库；
+# 因此只锚定**根目录**。不要写成 `*-preview.png`：那会把文档资产
+# docs/blackhole-preview.png（docs/TECHNICAL.md 第 10 节引用的验证证据）一起排除掉。
+/*-preview.png
+
+# ── 编辑器 / 操作系统噪声 ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.vscode/
+.idea/

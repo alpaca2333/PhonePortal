@@ -1,0 +1,8 @@
+{
+  "id": "notes",
+  "name": "我的笔记",
+  "description": "本地保存的随手笔记",
+  "icon": "📝",
+  "color": "#f7a44f",
+  "order": 1
+}
