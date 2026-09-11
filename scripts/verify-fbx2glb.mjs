@@ -24,9 +24,11 @@
  *      unit heuristics (100-unit Mixamo characters vs metre-scale props), the rig matcher's refusal to
  *      guess on ambiguity, and the settings schema (defaults, clamps, sparse overrides, unknown-key
  *      preservation) are all pinned here.
- *   5. IT STAYS LOCAL. Source-level assertions that the app never touches localStorage, never uses
- *      XMLHttpRequest/FormData, and has exactly ONE fetch — its own bundled sample asset. The whole
- *      "your files never leave the device" promise is a grep away from being false.
+ *   5. IT STAYS LOCAL — EXCEPT FOR THE BUTTON YOU PRESS. Source-level assertions that the app never
+ *      touches localStorage, never uses XMLHttpRequest/FormData, and that every fetch target is either
+ *      its own bundled sample asset or a RELATIVE /api/ route of this portal (no absolute URL exists in
+ *      the source). The conversion path itself is asserted to make zero asset requests: a publish only
+ *      happens when the user clicks 发布, and then exactly one PUT goes out.
  *
  * NOT asserted: that the preview renders, that touch orbit feels right, that a 10 MB Mixamo character
  * converts in an acceptable time on a phone. No browser here — those are 需真机确认 items in
@@ -318,7 +320,7 @@ section('3. 骨架匹配：精确 → 归一化（有歧义就拒绝猜）');
 // =============================================================================================
 // 4. 设置 schema (settings.ts)
 // =============================================================================================
-section('4. 设置：默认值 / 稀疏覆盖 / 脏数据 / 两组各自恢复默认');
+section('4. 设置：默认值 / 稀疏覆盖 / 脏数据 / 每组各自恢复默认');
 {
   check(settings.orientationOf({ width: 800, height: 600 }) === 'landscape', '横屏判定');
   check(settings.orientationOf({ width: 600, height: 800 }) === 'portrait', '竖屏判定');
@@ -363,6 +365,25 @@ section('4. 设置：默认值 / 稀疏覆盖 / 脏数据 / 两组各自恢复�
   settings.clearConvertGroup(keep);
   check(keep.convert === undefined && keep.future.x === 1, '恢复默认只清自己那组');
   check(!settings.hasConvertOverrides(keep), '清空后 hasConvertOverrides 为假');
+
+  // publish 组：目标应用的 id 只能按「形状」校验（应用列表来自 /api/manifest，存储里不可能有权威）
+  check(settings.publishDefaults().target === '', '发布目标默认「自动」（空串），不写死任何游戏');
+  const pubRaw = {};
+  settings.writePublishOverride(pubRaw, 'target', 'shooter');
+  check(pubRaw.publish.portrait.target === 'shooter' && pubRaw.publish.landscape.target === 'shooter',
+    '发布目标也两个方向都写');
+  check(settings.effectivePublish(pubRaw, 'portrait').target === 'shooter', '读回发布目标');
+  check(settings.effectivePublish({ publish: { portrait: { target: '../etc' } } }, 'portrait').target === '',
+    '形状不对的 id（脏数据）回落到「自动」，不抛错');
+  check(settings.effectivePublish({ publish: { portrait: { target: 42 } } }, 'portrait').target === '',
+    '非字符串的 id 同样回落');
+  check(settings.hasPublishOverrides(pubRaw), 'hasPublishOverrides 为真');
+  const pubKeep = { publish: { portrait: { target: 'shooter' } }, future: { y: 2 } };
+  settings.clearPublishGroup(pubKeep);
+  check(pubKeep.publish === undefined && pubKeep.future.y === 2, '发布组「恢复默认」只清自己那组');
+  check(!settings.hasPublishOverrides(pubKeep), '清空后 hasPublishOverrides 为假');
+  check(settings.APP_ID_RE.test('shooter') && !settings.APP_ID_RE.test('-x') && !settings.APP_ID_RE.test('a/b'),
+    '应用 id 形状与服务器 SCOPE_RE 一致');
 
   check(settings.clampSpeed(0.05) === 0.1, '速度下限钳制');
   check(settings.clampSpeed(99) === 2, '速度上限钳制');
@@ -730,9 +751,15 @@ section('10. 产物不变量：本地转换、DOM 契约、vendor');
   check(!/XMLHttpRequest/.test(codeOnly), '不使用 XMLHttpRequest');
   check(!/new\s+FormData|new\s+Blob\(\[\s*form/.test(codeOnly), '不使用 FormData（没有上传路径）');
   const fetches = [...js.matchAll(/fetch\(([^)]*)/g)].map((m) => m[1].trim());
-  check(fetches.length > 0 && fetches.length <= 3, 'fetch 调用点屈指可数（' + fetches.length + '）', fetches.join(' | '));
-  check(fetches.every((f) => f.includes("'./assets/")), '每一处 fetch 都指向应用自带的样例资源（用户文件永不上传/下载）',
-    fetches.join(' | '));
+  check(fetches.length > 0 && fetches.length <= 8, 'fetch 调用点屈指可数（' + fetches.length + '）', fetches.join(' | '));
+  // Two kinds are allowed, and nothing else: the app's own bundled sample assets, and the portal's
+  // relative /api/ routes (settings + the publish action). Absolute URLs are forbidden outright — that
+  // is the assertion that keeps "your model can only ever be sent to this device's own server" true.
+  check(fetches.every((f) => f.includes("'./assets/") || f.startsWith("'/api/")),
+    '每一处 fetch 要么是自带样例资源、要么是同源的 /api/ 路由', fetches.join(' | '));
+  check(fetches.every((f) => !/https?:/.test(f)), '没有任何绝对地址（源码级不可能把模型发到别处）', fetches.join(' | '));
+  const htmlOfPublish = html;
+  check(/发布/.test(htmlOfPublish) && /id="pubTarget"/.test(htmlOfPublish), '页面里有发布卡片');
 
   const referenced = [...new Set([...js.matchAll(/vendor\/(?:addons\/[A-Za-z0-9_/.\[\]-]+|meshopt\/[A-Za-z0-9_.-]+)\.js/g)].map((m) => m[0]))];
   check(referenced.length >= 5, '源码里引用了 ' + referenced.length + ' 个 vendor 模块（three addon + meshoptimizer）',
@@ -758,6 +785,10 @@ section('10. 产物不变量：本地转换、DOM 契约、vendor');
 // The pure modules above cannot prove that the PAGE is wired: an id typo, a wrong element type or a
 // boot-order mistake (the panel reads back into `main.ts` while it is still being constructed — a real
 // temporal-dead-zone crash that this section now guards) only shows up when the module actually runs.
+// The same run also drives 「发布」 end to end against an in-memory asset API, so the one feature that
+// writes to the server is proven to (a) send exactly one PUT of the real product Blob, (b) name the
+// target from the manifest, (c) refuse a format the target does not accept, and (d) never fire during
+// a conversion.
 // The shim below is deliberately faithful to the handful of DOM APIs the app uses; element ids and
 // tags are taken FROM index.html, so a control that stops existing fails here too.
 section('11. 装配层：DOM shim 启动真实 main.js，跑完整用户流程');
@@ -826,11 +857,50 @@ section('11. 装配层：DOM shim 启动真实 main.js，跑完整用户流程')
     matchMedia: () => ({ matches: false, addEventListener() {} }),
   };
 
-  // fetch: the app's own sample asset + the settings API. Anything else is a bug (the app has exactly
-  // one fetch, asserted in section 10).
+  // fetch: the app's own sample asset, the settings API, and the publish API. Anything else is a bug
+  // (section 10 asserts the source can only reach those). The asset API is modelled in memory — INCLUDING
+  // its overwrite semantics (`replaced`) — because the UI's messages depend on that field.
+  // The REAL fetch, kept so this section can put it back: it installs a recording shim below, and
+  // leaving that shim installed would break every later section that needs the network (every
+  // unexpected URL makes it throw) — which is exactly what §15's temporary server tripped over.
+  const outerFetch = globalThis.fetch;
   const requests = [];
+  const published = {};        // appId -> [{ name, bytes, mtime }]
+  const assetPuts = [];        // every PUT to /api/assets/*, with its body
+  const assetDeletes = [];
+  const TARGET_APPS = [
+    { id: 'shooter', name: '射击竞技场', assets: { accepts: ['glb'] } },
+    { id: 'cards', name: '卡牌游戏', assets: { accepts: ['png'] } },
+    { id: 'notes', name: '随手记' }, // no `assets` at all: must never be offered as a target
+  ];
   globalThis.fetch = async (url, init = {}) => {
     requests.push({ url: String(url), init });
+    const u = String(url);
+    if (u === '/api/manifest') {
+      return { ok: true, status: 200, json: async () => ({ apps: TARGET_APPS }) };
+    }
+    if (u.startsWith('/api/assets/')) {
+      const rest = u.slice('/api/assets/'.length);
+      const slash = rest.indexOf('/');
+      const appId = slash < 0 ? rest : rest.slice(0, slash);
+      const name = slash < 0 ? '' : rest.slice(slash + 1);
+      const list = published[appId] ?? (published[appId] = []);
+      if (init.method === 'PUT') {
+        assetPuts.push({ url: u, appId, name, body: init.body, type: (init.headers ?? {})['Content-Type'] });
+        const at = list.findIndex((f) => f.name === name);
+        const replaced = at >= 0;
+        const entry = { name, bytes: init.body?.size ?? 0, mtime: Date.now() };
+        if (replaced) list[at] = entry; else list.push(entry);
+        return { ok: true, status: replaced ? 200 : 201, json: async () => ({ app: appId, name, bytes: entry.bytes, replaced, url: '/assets/' + appId + '/' + name }) };
+      }
+      if (init.method === 'DELETE') {
+        assetDeletes.push(u);
+        const at = list.findIndex((f) => f.name === name);
+        if (at >= 0) list.splice(at, 1);
+        return { ok: true, status: 200, json: async () => ({ app: appId, name, deleted: true }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ app: { id: appId, name: appId }, accepts: [], files: list }) };
+    }
     if (String(url).includes('sample-textured.fbx')) {
       const bytes = readFileSync(new URL('../dist/apps/fbx2glb/assets/sample-textured.fbx', import.meta.url));
       return { ok: true, status: 200, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) };
@@ -888,14 +958,71 @@ section('11. 装配层：DOM shim 启动真实 main.js，跑完整用户流程')
     check(objectUrls.length === 0, '转换本身不创建下载 URL（只有真的点下载才创建，产物一直握在 Blob 里）');
 
     // ---- 点下载：走的是 Blob URL，不是网络 ----
-    const downloadBtn = elements.get('results').children[0].children[elements.get('results').children[0].children.length - 1];
+    // Found by LABEL, not by child index: the row also carries a 发布 button now (index-based lookup
+    // would silently grab the wrong one).
+    const buttonsIn = (el) => {
+      const out = [];
+      const walk = (n) => { for (const c of n.children ?? []) { if (c.tagName === 'BUTTON') out.push(c); walk(c); } };
+      walk(el);
+      return out;
+    };
+    const rowOf = (prefix) => elements.get('results').children
+      .find((r) => r.children[0].children[0].textContent.startsWith(prefix));
+    const btnByLabel = (el, re) => buttonsIn(el).find((b) => re.test(b.textContent));
     const before = requests.length;
-    downloadBtn.dispatch('click');
+    btnByLabel(rowOf('sample'), /^下载/).dispatch('click');
     await settle();
     check(requests.length === before, '点下载没有产生任何网络请求');
     check(logText().includes('已下载'), '日志记录了下载');
     const blob = objectUrls[objectUrls.length - 1];
     check(!!blob && blob.size > 1000, '下载的 Blob 有内容', blob ? names.formatBytes(blob.size) : 'none');
+
+    // ---- 发布到游戏：一键写进目标应用的外部资产目录 ----
+    check(assetPuts.length === 0, '转换 + 下载全程没有发过任何发布请求（发布是显式动作）', String(assetPuts.length));
+    check(requests.filter((r) => r.url === '/api/manifest').length === 1,
+      '启动时读一次 /api/manifest 来发现目标应用（转换器不写死任何游戏）',
+      String(requests.filter((r) => r.url === '/api/manifest').length));
+    elements.get('pubRefresh').dispatch('click');
+    await settle(20);
+    check(elements.get('pubTarget').children.length === 3,
+      '目标下拉 = 「自动」+ 两个声明接收资产的应用（没声明的 notes 不出现）',
+      elements.get('pubTarget').children.map((o) => o.value).join(','));
+    check(elements.get('pubTarget').value === '', '默认停在「自动」', elements.get('pubTarget').value);
+    check(elements.get('pubState').textContent.includes('射击竞技场'),
+      '「自动」解析成第一个目标（射击竞技场）', elements.get('pubState').textContent);
+    check(elements.get('pubList').children.length === 0, '还没发布过 → 列表为空');
+    const pubBtn = btnByLabel(rowOf('sample'), /^发布到/);
+    check(!!pubBtn && pubBtn.disabled === false, 'GLB 产物上的「发布」按钮可用', pubBtn ? pubBtn.textContent : 'missing');
+    check(btnByLabel(rowOf('sample'), /^发布到/).title.includes('data/assets/shooter/'),
+      '按钮提示里给出将写入的目录', btnByLabel(rowOf('sample'), /^发布到/).title);
+    pubBtn.dispatch('click');
+    await settle(20);
+    check(assetPuts.length === 1, '点一次发布 = 一次 PUT', String(assetPuts.length));
+    check(assetPuts[0].url === '/api/assets/shooter/sample.glb', 'URL 是 /api/assets/<应用>/<产物名>.glb',
+      assetPuts[0].url);
+    check(assetPuts[0].type === 'model/gltf-binary', '按 GLB 二进制发（不是 base64 塞进 JSON）', assetPuts[0].type);
+    check(assetPuts[0].body && assetPuts[0].body.size > 1000 && assetPuts[0].body === blob,
+      '发出去的就是那个产物 Blob 本身（没有重新编码）', String(assetPuts[0].body && assetPuts[0].body.size));
+    check(logText().includes('已发布 sample.glb') && logText().includes('/assets/shooter/sample.glb'),
+      '日志写出实际资产名与游戏要用的 URL', logText().slice(-220));
+    check(elements.get('pubList').children.length === 1 && elements.get('pubList').children[0].textContent.includes('sample.glb'),
+      '已发布列表出现 1 行');
+    check(elements.get('pubState').textContent.includes('1 个资产'), '状态行给出个数与总体积',
+      elements.get('pubState').textContent);
+    // 同名再发布：服务器回 replaced=true，UI 必须说出来（否则「我覆盖了什么」是隐形的）
+    btnByLabel(rowOf('sample'), /^发布到/).dispatch('click');
+    await settle(20);
+    check(assetPuts.length === 2 && logText().includes('覆盖了同名资产'), '同名发布会明说「覆盖」');
+    check(elements.get('pubList').children.length === 1, '覆盖不会在列表里多出一行');
+    // 删除
+    const delBtn = buttonsIn(elements.get('pubList').children[0]).find((b) => b.textContent === '✕');
+    check(!!delBtn, '已发布行上有删除按钮');
+    delBtn.dispatch('click');
+    await settle(20);
+    check(assetDeletes.length === 1 && assetDeletes[0] === '/api/assets/shooter/sample.glb',
+      '删除打到同一个 URL 的 DELETE', assetDeletes.join(','));
+    check(elements.get('pubList').children.length === 0, '删除后列表空了');
+    check(logText().includes('已删除已发布资产 shooter/sample.glb'), '日志记录了删除', logText().slice(-160));
 
     // ---- 外部贴图：经由「载入样例（外部贴图）」走一遍 UI ----
     const logBefore = logText().length;
@@ -931,12 +1058,40 @@ section('11. 装配层：DOM shim 启动真实 main.js，跑完整用户流程')
       'PUT 里两个方向都是新值（值没有方向语义，见 settings.ts）', JSON.stringify(puts[0]?.convert));
     check(elements.get('saveState').textContent.includes('已保存'), '状态行显示已保存', elements.get('saveState').textContent);
 
+    // ---- 发布目标也是一个设置项：落盘 + 只影响界面（换目标不改任何转换参数） ----
+    const putsBeforeTarget = puts.length;
+    elements.get('pubTarget').value = 'cards';
+    elements.get('pubTarget').dispatch('change');
+    await new Promise((r) => realSetTimeout(r, 600));
+    check(puts.length === putsBeforeTarget + 1 &&
+      puts[puts.length - 1]?.publish?.portrait?.target === 'cards' &&
+      puts[puts.length - 1]?.publish?.landscape?.target === 'cards',
+      '换目标会落盘（两个方向都写）', JSON.stringify(puts[puts.length - 1]?.publish));
+    check(elements.get('pubState').textContent.includes('卡牌游戏'), '界面立刻切到新目标',
+      elements.get('pubState').textContent);
+    const cardsBtn = btnByLabel(rowOf('sample'), /^发布到/);
+    check(cardsBtn.disabled === true && cardsBtn.textContent.includes('卡牌游戏'),
+      '换成不收 .glb 的目标后按钮禁用（并重新标了目标名）', cardsBtn.textContent);
+    check(rowOf('sample').textContent.includes('只接收 .png'), '行内写出禁用原因（手机上 title 提示看不见）',
+      rowOf('sample').textContent.slice(-120));
+    elements.get('publishReset').dispatch('click');
+    await new Promise((r) => realSetTimeout(r, 600));
+    check(elements.get('pubTarget').value === '', '「恢复默认」把目标退回「自动」', elements.get('pubTarget').value);
+    check(puts[puts.length - 1]?.publish === undefined, '「恢复默认」把 publish 整组从存储里删掉',
+      JSON.stringify(puts[puts.length - 1]));
+    check(btnByLabel(rowOf('sample'), /^发布到/).disabled === false, '回到自动目标后按钮又可用');
+
     // ---- 再转一次：扩展名跟着设置 ----
     elements.get('convertBtn').dispatch('click');
     await settle(120);
     const second = elements.get('results').children[0].textContent;
     check(second.includes('sample.gltf'), '第二次产物是 .gltf（设置真的生效了）', second.slice(0, 60));
     check(elements.get('results').children.length === 1, '重新转换会清空上一次的产物');
+    const gltfPub = btnByLabel(rowOf('sample'), /^发布到/);
+    check(gltfPub.disabled === true && rowOf('sample').textContent.includes('只接收 .glb'),
+      '.gltf 产物发布不了只收 .glb 的目标（禁用 + 说明，不是发出去再报错）',
+      rowOf('sample').textContent.slice(-140));
+    check(assetPuts.length === 2, '禁用状态下点了也没有请求（这里没点，数量不变）', String(assetPuts.length));
 
     // ---- 减面卡片：设置 → 落盘 → 导出 → 日志 ----
     check(elements.get('optDecimate').checked === false, '减面默认关闭（有损操作不默认开启）');
@@ -1056,6 +1211,17 @@ section('11. 装配层：DOM shim 启动真实 main.js，跑完整用户流程')
     check(elements.get('textureList').children.length === texturesBeforeDrop + 1, '拖进来的图片进贴图列表',
       texturesBeforeDrop + ' → ' + elements.get('textureList').children.length);
 
+    // ---- 读不到子应用列表：发布降级为禁用，而不是崩或静默 ----
+    const onlineFetch = globalThis.fetch;
+    globalThis.fetch = async () => { throw new Error('offline'); };
+    elements.get('pubRefresh').dispatch('click');
+    await settle(20);
+    check(logText().includes('读不到子应用列表，发布不可用'), '离线刷新会在日志里说明原因', logText().slice(-180));
+    check(btnByLabel(rowOf('sample'), /^发布到/) === undefined ||
+      btnByLabel(rowOf('sample'), /^发布到/).disabled === true,
+      '没有目标时发布按钮是禁用的');
+    globalThis.fetch = onlineFetch;
+
     // ---- 恢复默认清空整组 ----
     const putsBeforeReset = puts.length;
     elements.get('convertReset').dispatch('click');
@@ -1078,6 +1244,7 @@ section('11. 装配层：DOM shim 启动真实 main.js，跑完整用户流程')
   } finally {
     URL.createObjectURL = realCreateObjectURL;
     URL.revokeObjectURL = realRevoke;
+    globalThis.fetch = outerFetch;
   }
 }
 
@@ -1170,10 +1337,26 @@ section('12. 外部贴图：名字匹配 → 材质槽 → 内嵌进 GLB');
   check(textures.reportNeedsTextures(bare.textures), '「还缺贴图」为真（这会触发补图后的重新解析）');
   check(textures.textureSummaryText(bare.textures).includes('缺 1'), '摘要里写明缺几张',
     textures.textureSummaryText(bare.textures));
-  const bareMap = bare.root.getObjectByName('Body').material.map;
-  check(!!bareMap && bareMap.image === null, '材质槽存在但完全没有像素（就是「贴图丢了」的样子）');
-  check(bareMap.colorSpace === THREE.SRGBColorSpace, 'FBXLoader 已给颜色贴图标了 sRGB（回填也不能改掉）');
+  // 缺贴图的槽必须被「摘掉」而不是留着：GLTFExporter 对没有像素的贴图会**整个导出失败**
+  // （`No valid image data found`，实测），所以 "没配上的槽会空着" 这句文档要由代码来成立。
+  check(bare.textures.dropped === 1, '缺贴图的槽在导出前被摘掉（否则导出器会直接抛错）',
+    String(bare.textures.dropped));
+  const bareMat = bare.root.getObjectByName('Body').material;
+  check(bareMat.map === null, '材质上不再挂着没有像素的贴图对象', String(bareMat.map));
+  check(textures.textureSlots(bare.root).length === 0, '场景里已经没有空贴图槽');
+  check(bare.textures.missing.length === 1, '但报告仍然记得缺的是哪一个（摘掉 ≠ 忘掉）',
+    JSON.stringify(bare.textures.missing));
   check(bare.clips.length === 2, '贴图缺失不影响动画解析');
+  // 真正的回归门：这一条在修复前会红（导出器 throw），现在必须能导出、且产物里没有图。
+  {
+    const bareOut = await convert.exportScene(bare.root, { format: 'glb', animations: [], scale: 1 });
+    const bareBuffer = await bareOut.blob.arrayBuffer();
+    const bareJson = convert.readGlb(bareBuffer).json;
+    check(!bareJson.images || bareJson.images.length === 0, '缺贴图的模型照样导出成功，只是产物里没有图',
+      JSON.stringify(bareJson.images ?? null));
+    check(!!bareJson.materials && bareJson.materials.length === 1, '材质本身还在（用材质自己的颜色）',
+      String(bareJson.materials && bareJson.materials.length));
+  }
 
   // ---- 12.5 真样例（带贴图）：loader 自己加载 → 内嵌进 GLB ----
   // Headless stand-ins for the two browser APIs this path needs: an <img> that fires load for
@@ -1197,6 +1380,7 @@ section('12. 外部贴图：名字匹配 → 材质槽 → 内嵌进 GLB');
     check(textures.externalCounts(withTex.textures).filled === 1, '1 张外部贴图已补上');
     check(withTex.textures.missing.length === 0, '不再有缺的槽');
     check(withTex.textures.fallback.length === 0, '走的是主路线（loader 自己加载），不需要按名回填');
+    check(withTex.textures.dropped === 0, '提供了贴图时什么都不摘（槽真的有像素）', String(withTex.textures.dropped));
     const map = withTex.root.getObjectByName('Body').material.map;
     check(!!map && map.image !== null && map.image !== undefined, '材质槽拿到了真实图像对象');
     check(map.colorSpace === THREE.SRGBColorSpace, '颜色贴图的 sRGB 标记由 FBXLoader 设置（不是我们另写一套）');
@@ -1622,6 +1806,176 @@ section('14. 压缩贴图');
     check(pack.packSummaryText(unavailable).includes('不可用'), '摘要里说明不可用');
   } finally {
     globalThis.document = savedDocument;
+  }
+}
+
+// =============================================================================================
+// 15. HTTP API：POST 一个 FBX，拿回一个 GLB（server/src/fbx2glb.ts + fbx2glbWorker.ts）
+// =============================================================================================
+// 这一节起一个**真实服务器**（PORT=<空闲端口> + PORTAL_DATA_DIR 指向临时目录 + 1MB 的 FBX 上限），
+// 因为这条链的另一半根本不在浏览器里：路由、上传落盘、worker 线程、响应头、清理，只有真的发一次请求
+// 才谈得上验证。转换本身用的还是本仓库自己的模块（worker 里跑的就是 §6/§11 那套），所以这里断的是
+// 「HTTP 层有没有说真话」：状态码、响应头、返回的字节是不是真的能被读回、以及失败时会不会留下垃圾。
+section('15. HTTP API：FBX 进，GLB 出');
+{
+  // ---- 15.1 纯规则：参数解析（不启服务器也能钉） ----
+  const api = await import(new URL('../dist/server/src/fbx2glb.js', import.meta.url).href);
+  const q = (query) => api.parseConvertQuery(new URLSearchParams(query));
+  check(api.SCALE_MODES.join() === 'auto,keep,cm', 'scale 的三个取值与页面一致', api.SCALE_MODES.join());
+  const defaults = q('');
+  check(defaults.ok && defaults.value.options.scale === 'auto' && defaults.value.options.animations === true &&
+    defaults.value.options.decimate.enabled === false && defaults.value.options.decimate.lockBorder === true,
+    '默认参数 = 页面的出厂默认（auto 缩放 + 导出动画 + 不减面）', JSON.stringify(defaults));
+  check(defaults.ok && defaults.value.file === 'upload.fbx', '默认报告名 upload.fbx');
+  const named = q('name=hero%20v2.fbx&scale=cm&animations=0&decimate=1&ratio=0.25&error=0.02&lockBorder=0');
+  check(named.ok && named.value.file === 'hero v2.fbx' && named.value.options.scale === 'cm' &&
+    named.value.options.animations === false && named.value.options.decimate.ratio === 0.25 &&
+    named.value.options.decimate.error === 0.02 && named.value.options.decimate.lockBorder === false,
+    '显式参数原样落到请求上', JSON.stringify(named.ok ? named.value : named));
+  check(!q('decmate=1').ok, '未知参数 → 报错（宁可不转，也不要悄悄用默认值转）',
+    q('decmate=1').error);
+  check(!q('scale=metre').ok, 'scale 取值不对 → 报错');
+  check(!q('animations=maybe').ok, '布尔参数只认 1/0/true/false', q('animations=maybe').error);
+  check(!q('ratio=abc').ok, 'ratio 不是数字 → 报错');
+  check(!q('pack=1').ok && q('pack=1').error.includes('canvas'), 'pack=1 → 明确拒绝（服务器端没有 canvas）',
+    q('pack=1').error);
+  check(q('pack=0').ok, 'pack=0 只是「不压」，允许通过');
+  const dirty = q('name=' + encodeURIComponent('../../etc/passwd'));
+  check(dirty.ok && !dirty.value.file.includes('/'), '报告名里的路径被剥掉（它只出现在报告与错误信息里）',
+    dirty.ok ? dirty.value.file : dirty.error);
+
+  // ---- 15.2 起真实服务器 ----
+  const fsMod = await import('node:fs');
+  const net = await import('node:net');
+  const { spawn } = await import('node:child_process');
+  const tmpRoot = fsMod.mkdtempSync(new URL('../.verify-fbx2glb-api-', import.meta.url).pathname);
+  const port = await new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => { const p = srv.address().port; srv.close(() => resolve(p)); });
+  });
+  const base = 'http://127.0.0.1:' + port;
+  const serverLog = [];
+  const child = spawn(process.execPath, [new URL('../dist/server/src/index.js', import.meta.url).pathname], {
+    cwd: new URL('..', import.meta.url).pathname,
+    env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', PORTAL_DATA_DIR: tmpRoot, PORTAL_MAX_FBX_MB: '1' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stdout.on('data', (b) => serverLog.push(String(b)));
+  child.stderr.on('data', (b) => serverLog.push(String(b)));
+  try {
+    let up = false;
+    for (let i = 0; i < 100 && !up; i++) {
+      try { up = (await fetch(base + '/api/portal')).ok; } catch { await new Promise((r) => setTimeout(r, 150)); }
+    }
+    check(up, '临时服务器起来了（PORT=' + port + '，PORTAL_DATA_DIR 指向临时目录）', up ? '' : serverLog.join(''));
+    if (!up) throw new Error('server did not start');
+
+    // 自描述端点：参数列表必须与解析器认识的参数**完全一致**（否则文档就漂了）
+    const desc = await (await fetch(base + '/api/fbx2glb')).json();
+    check(desc.endpoint === 'POST /api/fbx2glb/convert', 'GET /api/fbx2glb 说明入口', String(desc.endpoint));
+    check(Object.keys(desc.params).sort().join() === [...api.CONVERT_PARAMS].sort().join(),
+      '自描述的参数列表 = 解析器接受的参数（两处不可能漂）',
+      Object.keys(desc.params).join() + ' vs ' + api.CONVERT_PARAMS.join());
+    check(desc.limits.maxFbxBytes === 1024 * 1024 && desc.limits.concurrency === 1,
+      '自描述里写明上限与并发度', JSON.stringify(desc.limits));
+    check(Array.isArray(desc.unsupported) && desc.unsupported.some((u) => u.includes('贴图')),
+      '自描述里明确写出「贴图不支持」', (desc.unsupported ?? []).join(' | ').slice(0, 80));
+
+    // ---- 15.3 真样例：FBX 进，GLB 出（并把产物读回来） ----
+    const res = await fetch(base + '/api/fbx2glb/convert?name=idle.fbx', {
+      method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: sampleBuffer.slice(0),
+    });
+    check(res.status === 200, 'POST 样例 → 200', String(res.status));
+    check(res.headers.get('content-type') === 'model/gltf-binary', 'Content-Type 是 model/gltf-binary',
+      String(res.headers.get('content-type')));
+    check((res.headers.get('content-disposition') ?? '').includes('idle.glb'), '带 Content-Disposition（curl -OJ 能直接落盘）',
+      String(res.headers.get('content-disposition')));
+    const glbBytes = new Uint8Array(await res.arrayBuffer());
+    check(glbBytes.length === Number(res.headers.get('x-fbx2glb-bytes')), '响应头里的字节数 = 实际收到的字节数',
+      glbBytes.length + ' vs ' + res.headers.get('x-fbx2glb-bytes'));
+    const glbBuffer = glbBytes.buffer.slice(glbBytes.byteOffset, glbBytes.byteOffset + glbBytes.byteLength);
+    const glbJson = convert.readGlb(glbBuffer).json;
+    check(glbJson.meshes?.length === 1 && glbJson.skins?.[0]?.joints?.length === 2,
+      '产物是个真 GLB：1 网格 + 2 关节', JSON.stringify({ meshes: glbJson.meshes?.length, joints: glbJson.skins?.[0]?.joints?.length }));
+    check(glbJson.animations?.length === 2, '2 个动画都被写进去了', String(glbJson.animations?.length));
+    check((glbJson.animations ?? []).map((a) => a.name).join() === 'idle,idle-2',
+      '动作按**文件名**命名并去重（Mixamo 每个 take 都叫 mixamo.com，不改名第二个动作永远取不到）',
+      JSON.stringify((glbJson.animations ?? []).map((a) => a.name)));
+    check(Number(res.headers.get('x-fbx2glb-bones')) === 2 && Number(res.headers.get('x-fbx2glb-clips')) === 2,
+      '响应头报告骨骼数与动作数', res.headers.get('x-fbx2glb-bones') + ' / ' + res.headers.get('x-fbx2glb-clips'));
+    check(res.headers.get('x-fbx2glb-self-check') === 'ok', '服务器自己把产物读回来过（自检 ok）',
+      String(res.headers.get('x-fbx2glb-self-check')));
+    check(decodeURIComponent(res.headers.get('x-fbx2glb-clip-names')) === 'idle,idle-2',
+      '动作名也在响应头里（caller 不用打开文件就知道里面有什么）',
+      String(res.headers.get('x-fbx2glb-clip-names')));
+    check(Number(res.headers.get('x-fbx2glb-input-bytes')) === sampleBuffer.byteLength,
+      '响应头报告输入字节数', String(res.headers.get('x-fbx2glb-input-bytes')));
+
+    // ---- 15.4 带贴图的 FBX：贴图会被摘掉，而且**如实报告** ----
+    // (§12 的 texBuffer 在它自己的块作用域里，这里重新读一份 —— 这一节要能单独跑。)
+    const texBytes = readFileSync(new URL('../dist/apps/fbx2glb/assets/sample-textured.fbx', import.meta.url));
+    const texFbx = texBytes.buffer.slice(texBytes.byteOffset, texBytes.byteOffset + texBytes.byteLength);
+    const texRes = await fetch(base + '/api/fbx2glb/convert?name=hero.fbx', {
+      method: 'POST', body: texFbx.slice(0),
+    });
+    check(texRes.status === 200, '带外部贴图的 FBX 也能转（贴图槽被摘掉，而不是整个失败）', String(texRes.status));
+    check(texRes.headers.get('x-fbx2glb-textures') === 'requested=1;dropped=1',
+      '响应头如实报告「要了 1 张、丢了 1 张」——服务器端没有解码器，这一条就是它不能说谎的地方',
+      String(texRes.headers.get('x-fbx2glb-textures')));
+    const texWarn = decodeURIComponent(texRes.headers.get('x-fbx2glb-warnings') ?? '');
+    check(texWarn.includes('贴图') && texWarn.includes('页面'), '告警里直接告诉调用方「要带贴图请用页面」', texWarn.slice(0, 90));
+    const texJson = convert.readGlb(new Uint8Array(await texRes.arrayBuffer()).buffer).json;
+    check(!texJson.images || texJson.images.length === 0, '产物里确实没有图（不是「有图但坏了」）',
+      JSON.stringify(texJson.images ?? null));
+
+    // ---- 15.5 失败路径：每一类都有自己的状态码，而且不留垃圾 ----
+    const post = (body, query = '') => fetch(base + '/api/fbx2glb/convert' + query, { method: 'POST', body });
+    const junk = await post(Buffer.from('<!doctype html>not an fbx at all'));
+    check(junk.status === 400 && (await junk.json()).error.includes('既不是 FBX'),
+      '垃圾 body → 400（并且说明它是什么）', String(junk.status));
+    const glbIn = await post(Buffer.from(glbBytes));
+    const glbErr = await glbIn.json();
+    check(glbIn.status === 400 && glbErr.error.includes('/api/assets'),
+      '.glb 输入 → 400，并指路「要发布就用 /api/assets」（不是把 GLB 硬塞给 FBXLoader）', glbErr.error.slice(0, 90));
+    const empty = await post(Buffer.alloc(0));
+    check(empty.status === 400, '空 body → 400', String(empty.status));
+    const badParam = await post(sampleBuffer.slice(0), '?nope=1');
+    check(badParam.status === 400 && (await badParam.json()).error.includes('未知参数'),
+      '未知参数 → 400（服务器侧同样严格）', String(badParam.status));
+    const pack = await post(sampleBuffer.slice(0), '?pack=1');
+    check(pack.status === 400 && (await pack.json()).error.includes('canvas'), 'pack=1 → 400', String(pack.status));
+    const tooBig = await post(Buffer.alloc(1_500_000, 0x41));
+    check(tooBig.status === 413 && (await tooBig.json()).error.includes('上限'),
+      '超过上限的 body → 413（测试实例的上限是 1MB）', String(tooBig.status));
+    const getRes = await fetch(base + '/api/fbx2glb/convert');
+    check(getRes.status === 405, 'GET 这个路径 → 405', String(getRes.status));
+    const slash = await fetch(base + '/api/fbx2glb/nope', { method: 'POST', body: 'x' });
+    check(slash.status === 404, '别的子路径 → 404', String(slash.status));
+    const tmpDir = new URL('../' + tmpRoot.split('/').pop() + '/tmp/', new URL('file://' + tmpRoot + '/'));
+    let leftovers = [];
+    try { leftovers = fsMod.readdirSync(tmpDir.pathname); } catch { leftovers = []; }
+    check(leftovers.length === 0, '所有请求（含失败的那些）都没有在 data/tmp 留下文件', leftovers.join(','));
+
+    // ---- 15.6 队列：两个并发请求都成功（串行执行，而不是互相踩） ----
+    const [a, b] = await Promise.all([
+      post(sampleBuffer.slice(0), '?name=first.fbx'),
+      post(sampleBuffer.slice(0), '?name=second.fbx'),
+    ]);
+    check(a.status === 200 && b.status === 200, '两个并发请求都拿到 200（排队，不是拒绝也不是互相覆盖）',
+      a.status + ' / ' + b.status);
+    const aNames = decodeURIComponent(a.headers.get('x-fbx2glb-clip-names') ?? '');
+    const bNames = decodeURIComponent(b.headers.get('x-fbx2glb-clip-names') ?? '');
+    check(aNames === 'first,first-2' && bNames === 'second,second-2',
+      '两个请求的产物互不干扰（各自按自己的文件名命名）', aNames + ' | ' + bNames);
+  } catch (err) {
+    check(false, 'HTTP API 这一段没有抛错', err instanceof Error ? err.message : String(err));
+  } finally {
+    child.kill('SIGTERM');
+    await new Promise((r) => setTimeout(r, 300));
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
+    fsMod.rmSync(tmpRoot, { recursive: true, force: true });
+    check(!fsMod.existsSync(tmpRoot), '临时目录已清理');
   }
 }
 

@@ -162,10 +162,20 @@ export interface TextureReport {
   unused: string[];
   /** The loader did not finish in time (a texture that never resolves). */
   timedOut: boolean;
+  /**
+   * Slots DROPPED before export because their texture never got pixels (see dropPendingTextureSlots).
+   * Set by `parseFbx`, and the number the API reports in `X-Fbx2Glb-Textures`: on a device/browser this
+   * is normally 0 (the user supplied the files), but the headless API never has images, so there it is
+   * the honest answer to "did I lose anything?".
+   */
+  dropped: number;
 }
 
 export function emptyTextureReport(): TextureReport {
-  return { requested: [], fallback: [], withImage: 0, placeholders: [], missing: [], unused: [], timedOut: false };
+  return {
+    requested: [], fallback: [], withImage: 0, placeholders: [], missing: [], unused: [],
+    timedOut: false, dropped: 0,
+  };
 }
 
 /** How many external references this FBX asked for / how many of them we answered. */
@@ -316,6 +326,27 @@ export async function applyTextureFallback(
       // An image the browser cannot decode: leave it pending so the report can say so.
     }
   }
+}
+
+/**
+ * Remove the texture slots that still have no pixels, and report how many.
+ *
+ * ⚠️ WHY THIS EXISTS (measured, not defensive): a slot whose `image` never arrived (missing external
+ * file, an undecodable `.tga`, or — for the headless API — a texture we could not load at all) does not
+ * export as "no texture": `GLTFExporter.processImage()` throws
+ * `THREE.GLTFExporter: No valid image data found. Unable to process texture.` and **the whole export
+ * fails**. So "没配上的槽会空着" must be made true deliberately: the slot is set to `null` here, the
+ * material keeps its own colour, and the report already names what was lost (missing / placeholders).
+ *
+ * MUST RUN AFTER `finishTextureReport`: that pass needs the texture OBJECT to read `texture.name` (the
+ * name the FBX wanted), which is exactly what we are about to detach.
+ */
+export function dropPendingTextureSlots(root: any): number {
+  const pending = pendingTextureSlots(root);
+  for (const slot of pending) {
+    if (slot.material && slot.material[slot.slot] === slot.texture) slot.material[slot.slot] = null;
+  }
+  return pending.length;
 }
 
 /** Final pass: classify what is still empty, and which supplied files nothing referenced. */

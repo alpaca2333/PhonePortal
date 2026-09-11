@@ -47,7 +47,10 @@
     ├─ package.json              # 脚本: build / start / dev / launch；devDeps 仅 typescript + @types/node
     ├─ tsconfig.json             # 全量编译配置（rootDir="." outDir="dist"，include 4 处源码）
     ├─ data/                     # ★ 运行时用户数据（不在 dist/ 内、已 gitignore）
-    │  └─ settings.json          # 设置存储：{ "<scope>": <JSON 对象> }，由 /api/settings 读写
+    │  ├─ settings.json          # 设置存储：{ "<scope>": <JSON 对象> }，由 /api/settings 读写
+    │  ├─ assets/                # ★ 外部资产目录：<appId>/<name>，由 /api/assets 写、/assets 读
+    │  │                         #   （跨子应用「发布」的产物；按需创建，不在源码树里）
+    │  └─ tmp/                   # ★ 转换 API 的临时目录（上传的 FBX + 产出的 GLB，请求结束即删）
     ├─ scripts/
     │  ├─ build.mjs              # 构建入口：tsc 到 dist.next/ → 拷静态资源 → 原子换入 dist/
     │  ├─ dev-serve.mjs          # dev 监督者（= npm run dev）：轮询源码签名 → 重建 → 重启服务器子进程
@@ -72,13 +75,18 @@
     │  ├─ verify-character-render.mjs # 射击子应用**着色器空间**的角色验证：按 GLTFLoader 的方式重建场景（网格节点即 SkinnedMesh、单位阵绑定）后走真实 `spawnFromTemplate`，用 `applyBoneTransform × matrixWorld` 量「画出来多大」「有没有巨大网格」「**描边外壳的世界厚度 ≈ OUTLINE_WIDTH**」——真机「每个人都是巨大黑球」的回归门（Box3 类断言看不见着色器里的偏移）
     │  ├─ preview-model.mjs      # **离线模型预览**（本环境无浏览器）：把任意 .glb/.gltf 的四个正交视图光栅化成一张 PNG（零依赖自写 PNG + 平面着色，绑定姿势、不做蒙皮），用来在换模型前真的看一眼形状/朝向/手持物
     │  ├─ verify-fbx2glb.mjs    # FBX→GLB 子应用（apps/fbx2glb）：**用真样例跑真管线**——vendored FBXLoader 解析（蒙皮/骨骼/两个 take）→ 合并（挑本体/骨架漂移重定向/覆盖率门跳过）→ GLTFExporter 写出 GLB → 容器断言（magic/长度/对齐/单一 buffer/无 uri/通道指向关节）→ **GLTFLoader 读回自检** → 缩放只发生一次（含 `readGlb`/`writeGlb` 往返与「缩放不改 BIN」）→ 命名/单位/骨架匹配/设置 schema 的纯规则 → **「不上传」源码级断言**（无 localStorage/XHR/FormData、唯一 fetch 只取内置样例）→ **DOM shim 启动真实 main.js 走一遍用户流程**（样例→转换→下载不联网→改设置只发一次 PUT→多文件/合并两种模式→恢复默认真的落盘→混拖 FBX+图片按扩展名分流）→ **外部贴图（贴图与 FBX 分体）**：名字匹配/主干名匹配、`setURLModifier` 把引用换成 blob: URL 交给 loader 自己加载、占位槽按名回填、`sample-textured.fbx` 不带与带贴图各解析一遍、产物里 `images[0].bufferView` + 无 `uri` + `baseColorTexture` + BIN 里的 PNG 魔数 → **自动减面**：纯规则（目标面数/跳过规则）+ 合成 6016 面蒙皮球真减到 3008 面（−50%）+「所有属性按同一张 remap 表压紧 / 索引不越界 / **每个顶点蒙皮权重和仍为 1** / 原模型一点没变」+ 减面后 GLB 更小且能被 GLTFLoader 读回（JOINTS/WEIGHTS/TEXCOORD 都在）+ **多材质分组 1/3/8/264 组的回归门（减到目标、只减不增、分组之和 = 索引长度）** + 两条护栏（simplifier 返回更多/抛错都保留原几何体）+ 输入格式探测 + **压缩贴图**（等比尺寸规则、按槽位选编码、共享图片只压一次、超大 canvas 跳过、GLB 里只有 2 张图且 mimeType 正确）（另加「dist 比源码新」的新鲜度断言）
+    │  ├─ verify-assets.mjs      # **外部资产目录**（跨子应用「发布」）：起一个真实服务器（PORTAL_DATA_DIR 指向临时目录 + 1MB 上限）跑完整 API —— manifest 的 `assets.accepts` 决定谁能收、发布→列表→读取→覆盖→删除、字节级往返、被截断/非 GLB/超限/坏名字/未知应用全部拒绝**且已发布的那个文件字节与 mtime 不变**、`/assets` 与自带 `apps/<id>/assets/` 并存、穿越防护；外加客户端纯规则（名字清洗、目标解析、禁用原因文案、**所有 fetch 都是同源相对地址**）
     │  ├─ verify-diag.mjs        # 射击子应用**卡顿归因**（`?diag=1`）：`diagcore.ts` 的七条规则与正反用例（编译同时掉堆必须报编译 / 长帧但 JS 便宜不许算到 sim / 无 `performance.memory` 就不给 GC 归因）+ 有界日志与分位 + 用 DOM shim 和假时钟/假堆驱动真实 `diag.ts` 的帧记账、读数、点按面板、`report()`/`json()`、**分辨率链（`postfx.ts::resolutionChain/resolutionText`：两个方向的 texel 数相同、相机高度差出 13.8 vs 18.7 px/世界单位、`像素化 = 0` 时改吃画布与 DPR、脏数据不印 NaN，以及 badge 第二行 / 面板两行 / `json().resolution` 的接线与「provider 抛错静默留空」）**
     │  └─ trace-shooter.mjs      # 子应用回归工具：固定 PRNG 跑脚本化场景，逐帧打印射击模拟状态（重构前后 diff 必须为空）
     ├─ server/                   # 后端（Node + TS，编译到 dist/server/src/*.js）
     │  └─ src/
     │     ├─ index.ts            # HTTP 服务器：路由、静态服务、API、MIME、防路径穿越、请求体读取
     │     ├─ registry.ts         # 扫描 apps/*/manifest.json 生成注册表；PORTAL 元信息；ROOT 常量
-    │     └─ settings.ts         # 设置存储：读写 data/settings.json（原子写 + 串行队列 + 结构校验）
+    │     ├─ settings.ts         # 设置存储：读写 data/settings.json（原子写 + 串行队列 + 结构校验）
+    │     ├─ assets.ts           # 外部资产存储：data/assets/<appId>/ 的名字/路径校验、流式上传（带上限）、
+    │     │                      #   GLB 头校验、原子替换、列表、删除、流式读取（见第 4 节）
+    │     ├─ fbx2glb.ts          # 子应用自己的 HTTP API：POST /api/fbx2glb/convert（校验/落盘/队列/超时/响应头）
+    │     └─ fbx2glbWorker.ts    # 在 worker 线程里跑 apps/fbx2glb 的模块（+ 最小假 DOM），见第 4 节
     ├─ shell/                    # 门户外壳（前端；编译到 dist/shell/*.js）
     │  ├─ index.html             # 门户主页（引用 /shell/styles.css 与 /shell/main.js）
     │  ├─ styles.css             # 门户样式（移动优先、深色、CSS 变量、safe-area）
@@ -86,14 +94,15 @@
     ├─ shared/                   # 前后端共享（编译到 dist/shared/src/*.js）
     │  └─ src/
     │     ├─ types.ts            # SubAppManifest / PortalManifest / normalizeManifest / DEFAULT_COLOR
+    │     │                      #   + assets.accepts（谁接收发布资产）的归一化
     │     └─ settings.ts         # 设置 API 的浏览器侧封装：loadSettings / saveSettings（永不抛错）
     └─ apps/                     # 子应用目录（每个子应用 = 一个独立网站）
        ├─ notes/                 # 📝 我的笔记（localStorage：笔记正文属于「应用内容」）
        ├─ clock/                 # ⏰ 时钟 + 秒表
        ├─ calculator/            # 🧮 计算器（内置表达式解析，无 eval）
        ├─ blackhole/             # 🕳️ 黑洞（WebGL2 Schwarzschild 光线追踪 + 吸积盘）
-       ├─ fbx2glb/               # 🧊 FBX → GLB 转换器（浏览器内转换：vendored three r160 的 FBXLoader + GLTFExporter + GLTFLoader，把多个 Mixamo 动作文件合并成一个自带全套 clip 的角色文件；自动挑角色本体 + 骨架名重定向 + 占位 take 名处理 + 实测高度自动厘米→米 + **外部贴图按名字匹配并内嵌进 GLB**（`setURLModifier` 让 loader 自己加载 + 占位槽按名回填）+ **自动减面（vendored meshoptimizer，只重写索引 + 同一张 remap 表压紧所有属性，蒙皮/UV/多材质分组都保留）** + **压缩贴图（等比降分辨率 + 不透明贴图转 JPEG；共享图片只压一次、超大 canvas 有内存护栏）** + 导出后读回自检 + WebGL 预览；**文件不上传**；设置四组（转换/减面/贴图/预览），见 apps/fbx2glb/README.md）
-       └─ shooter/               # 🎯 射击竞技场（Three.js 室内 76×76 掩体射击 PvE + Kenney 室内道具（CC0，49 个 .glb/541KB）+ 枪手 AI（复用 `weapons.ts`：预警 0.5s → 打空一梭子 → 换弹）+ 20 块掩体 + 视野遮挡（隐藏/变暗）+ 弹夹/自动换弹 + 背包与物品槽位（20 格 + 主/副武器/投掷/治疗/护甲）+ 备弹（单格 200）+ 护甲穿透（穿甲 0–6 驱动默认公式：甲伤 ×0.7/级、肉伤 100/75/50/0%；**每弹药可按护甲等级覆写甲伤/肉伤表**，样板龙息弹 = Lv4 显示 / 穿甲 0 / 1–4 级甲 100% 甲伤；敌人按波次配甲、六色等级标识）+ 4 把武器 + **满屏分页设置面板（六页：操控/画面/视野/光照/雾/后期；画面含相机高度与水平角度）**，见 apps/shooter/README.md）
+       ├─ fbx2glb/               # 🧊 FBX → GLB 转换器（浏览器内转换：vendored three r160 的 FBXLoader + GLTFExporter + GLTFLoader，把多个 Mixamo 动作文件合并成一个自带全套 clip 的角色文件；自动挑角色本体 + 骨架名重定向 + 占位 take 名处理 + 实测高度自动厘米→米 + **外部贴图按名字匹配并内嵌进 GLB**（`setURLModifier` 让 loader 自己加载 + 占位槽按名回填）+ **自动减面（vendored meshoptimizer，只重写索引 + 同一张 remap 表压紧所有属性，蒙皮/UV/多材质分组都保留）** + **压缩贴图（等比降分辨率 + 不透明贴图转 JPEG；共享图片只压一次、超大 canvas 有内存护栏）** + 导出后读回自检 + WebGL 预览；**转换不上传**，唯一的服务器写入是显式的「发布」到子应用的外部资产目录（`data/assets/<应用>/`，候选来自 `/api/manifest`，不写死游戏）；设置五组（转换/减面/贴图/发布/预览），见 apps/fbx2glb/README.md）
+       └─ shooter/               # 🎯 射击竞技场（Three.js 室内 76×76 掩体射击 PvE + Kenney 室内道具（CC0，49 个 .glb/541KB）+ 枪手 AI（复用 `weapons.ts`：预警 0.5s → 打空一梭子 → 换弹）+ 20 块掩体 + 视野遮挡（隐藏/变暗）+ 弹夹/自动换弹 + 背包与物品槽位（20 格 + 主/副武器/投掷/治疗/护甲）+ 备弹（单格 200）+ 护甲穿透（穿甲 0–6 驱动默认公式：甲伤 ×0.7/级、肉伤 100/75/50/0%；**每弹药可按护甲等级覆写甲伤/肉伤表**，样板龙息弹 = Lv4 显示 / 穿甲 0 / 1–4 级甲 100% 甲伤；敌人按波次配甲、六色等级标识）+ 4 把武器 + **满屏分页设置面板（六页：操控/画面/视野/光照/雾/后期；画面含相机高度与水平角度）** + **接收外部发布资产**（manifest 的 `assets.accepts = ["glb"]`，落盘 `data/assets/shooter/`），见 apps/shooter/README.md）
 
 **子应用目录内部**（`apps/<id>/`）：
 
@@ -131,8 +140,15 @@
 | 4 | `GET /api/settings` | 返回整个设置存储 `{ "<scope>": value }`；其它方法 405 |
 | 5 | `GET /api/settings/<scope>` | 返回 `{ scope, value }`；未存过 `value: null`；scope 非法 400 |
 | 6 | `PUT /api/settings/<scope>` | 读 body（≤8KB）→ JSON 解析 → 结构校验 → 原子写盘 → `{ scope, value }`；其它方法 405 |
-| 7 | `GET /` 或 `/index.html` | 服务 `dist/shell/index.html`（门户主页） |
-| 8 | 其它静态路径 | 从 `dist/` 之下按文件服务（shell/apps/shared 的资源都在这） |
+| 7 | `GET /api/assets` | 列出**所有声明接收资产**的子应用及其文件；其它方法 405 |
+| 8 | `GET /api/assets/<appId>` | `{ app, accepts, files[] }`；未知应用 404 |
+| 9 | `PUT /api/assets/<appId>/<name>` | 流式收 body → 校验（扩展名 / GLB 头 / 上限）→ 原子落盘 → `{ name, bytes, replaced, url }`（新文件 201，覆盖 200） |
+| 10 | `DELETE /api/assets/<appId>/<name>` | 删除一个已发布资产；不存在 404 |
+| 11 | `GET /assets/<appId>/<name>` | 流式返回外部资产（`model/gltf-binary`）；不存在 404、其它方法 405 |
+| 12 | `GET /api/fbx2glb` | 转换 API 的自描述（参数、响应头、上限、不支持的东西） |
+| 13 | `POST /api/fbx2glb/convert` | 收一个 FBX（裸 body，流式落盘到 `data/tmp/`）→ 在 worker 里用子应用自己的模块转成 GLB → 返回 `model/gltf-binary`；报告走响应头 |
+| 14 | `GET /` 或 `/index.html` | 服务 `dist/shell/index.html`（门户主页） |
+| 15 | 其它静态路径 | 从 `dist/` 之下按文件服务（shell/apps/shared 的资源都在这） |
 | 兜底 | 未命中 | 404 |
 
 **静态服务关键点**（`serveFile`）：
@@ -151,6 +167,45 @@
 - **降级**：文件缺失 → `{}`；文件损坏/不是 JSON 对象 → `console.warn` + 当 `{}`（不崩、也不自动覆盖用户文件）。
 - **客户端封装**：`shared/src/settings.ts` 的 `loadSettings(scope)` / `saveSettings(scope, value)` 永不抛错，失败返回 `{ ok:false, error }`；子应用用相对路径导入（见第 6 节）。失败时应用必须继续用本地默认值/本地值运行，只把「保存失败」显示出来。
 - **用户数据不进 web 根**：`data/` 不在 `dist/` 之下，所以 `GET /data/settings.json` 是 404（已实测）。
+
+**外部资产目录（`data/assets/`，跨子应用「发布」——`server/src/assets.ts` + `apps/fbx2glb/src/publish.ts`）**
+
+- **它解决什么**：转换器（`apps/fbx2glb`）产出的 GLB 要能被游戏（当前 `apps/shooter`）加载，而这类文件是**运行时用户内容**（几十 MB、随时增删、不入库），既不能放 `apps/` 也不能放 `dist/`（理由见下）。于是有一个专门的、`dist/` 之外的资产根，按子应用分目录。
+- **磁盘路径 ≠ URL**：文件在 `<ROOT>/data/assets/<appId>/<name>`，浏览器读 `/assets/<appId>/<name>`。URL 是**应用级的逻辑路由**，所以存储布局以后要改（分版本、分类型子目录）也不用动任何游戏。
+- **为什么不在 `apps/<id>/assets/`**：① `scripts/dev-serve.mjs` 轮询 `apps/`，**每次发布都会触发一轮 tsc 重建 + 重启服务器**；② `scripts/build.mjs` 把 `apps/` 整棵拷进 `dist/`，于是一个 30MB 的 .glb 会在**每次**构建里被复制一遍，并在 `dist.next → dist` 换目录时再复制一遍；③ 发布会把 git 工作区弄脏，而这类二进制本就不该入库（**GitHub 单文件 >100MB 直接拒绝推送**——发布一个买来的模型不能有能力弄坏仓库）。`data/` 已 gitignore，也不在 dev 轮询范围内。
+- **谁说了算：接收方在 manifest 里声明** `"assets": { "accepts": ["glb"] }`。没声明的应用：服务端一律 **415** 拒收，发布端的目标列表（来自 `GET /api/manifest`）里也不会出现它。**加一个新游戏 = 在它的 manifest 里加一行**，服务器与转换器都不用改（`normalizeAssetIntake` 会把 `.GLB`/空格/重复项归一，脏数据一律当作「不接收」而不是抛错）。
+- **写入语义（这是「一键覆盖」敢成立的原因）**：流式写到隐藏的 `.<name>.<rand>.part` → 校验 → `rename()` **原子替换**。**任何失败都不碰已发布的那个文件**（超限 413 / 非 GLB 或截断 400 / 坏名字 400 / 未声明 415），临时文件也会删掉；读方永远不会看到半个文件。
+- **服务端只校验两个业务事实**（其余交给应用自己）：① 扩展名必须在该应用的 `accepts` 里；② `.glb` 的头 —— magic `glTF` + 版本 2 + **头里声明的总长度与实际收到字节数一致**（GLB 开头 12 字节就写着总长，所以「手机上传被截断」能被当场抓住；让游戏去加载半个模型，报错会难查得多）。
+- **上限**：默认 **256MB**，`PORTAL_MAX_ASSET_MB` 可覆盖，且**夹在 1–4096 之间**、脏值回落默认 —— 写错一个环境变量不会让上限消失。413 的文案把用户指回转换器的「压缩贴图」（264MB 的角色通常就是 99% 贴图）。
+- **`PORTAL_DATA_DIR`**：`data/` 的根可以用环境变量整体挪走（**为此存在**：`scripts/verify-assets.mjs` 起真实服务器时用它指向临时目录，免得测试往用户的资产库里写东西）。默认仍是 `<ROOT>/data`，相对值按 `ROOT` 解析（不是 cwd）。
+- **读取**：`GET /assets/...` 用 `createReadStream` 流式返回，**不支持 Range**（glTF 加载器整文件拉取，部分文件协议在这里是白搭）。刻意不用 `fs.readFile`：上限 256MB，而这跑在手机上。
+- **与「自带资产」的区别（名字像，但完全是两件事）**：`apps/shooter/assets/models|props/` 是**随源码入库的内置资产**（构建时进 `dist/`，URL `/apps/shooter/assets/...`）；`data/assets/shooter/` 是**运行时发布的外部资产**（URL `/assets/shooter/...`）。两者同时存在、互不影响。
+- **接收方怎么用（当前还没接，是 shooter README 里的待办）**：`fetch('/api/assets/shooter')` 拿列表 → `GLTFLoader.loadAsync('/assets/shooter/<name>')`（复用 `assets.ts::getGLTFLoader`）。**必须用绝对路径**：`./assets/...` 会解析到 `/apps/shooter/assets/...`（自带的那个）。
+
+**子应用自己的 HTTP API（`POST /api/fbx2glb/convert`——`server/src/fbx2glb.ts` + `fbx2glbWorker.ts`）**
+
+- **为什么子应用要能提供 API**：AGENTS.md 的硬规则是「子应用之间不互相 import、不互相写文件」，所以跨应用
+  传数据只有两条路 —— 目录（外部资产，上一节）与 **HTTP**。转换器把「FBX 进、GLB 出」做成一个端点，
+  别的应用（或 `curl`）就能调它，而不需要共享代码。
+- **服务端不写第二套转换实现**：worker 里 `import` 的就是 `dist/apps/fbx2glb/src/*.js` —— 页面加载的那几个
+  模块（嗅探格式、骨架、缩放判定、容器写法、动作命名都只有一份真相）。服务端只补环境。
+- **在 worker 线程里跑**（`worker_threads`）：① 门户同时还要给游戏发资产，一次 200MB 的解析不能卡住主线程；
+  ② three 的堆炸掉时崩的是那个 worker（这一个请求 500，门户照常）；③ 跑完就 `terminate()`。
+  Node 解析不了裸标识符 `three`，所以 worker 里用 `module.registerHooks` 把它指到**该应用自己 vendored
+  的那份 three**（与页面同一份字节，见 `verify-fbx2glb` 第 10 节）。
+- **补的「浏览器」只有四样**：`self` / `ProgressEvent` / `FileReader`（`Blob.arrayBuffer()` 兜住）/
+  一个**永远触发 `error`** 的假 `<img>`（Node 没有图片解码器）——「贴图加载失败」走的正是浏览器里
+  「贴图文件找不到」那条既有路径。
+- **⚠️ 因此贴图是页面专属功能**：拼图的那一步（`canvas` + 重新编码 + 等比缩放 + 共享去重）只能在浏览器里做。
+  API 的产物**没有贴图**，并且在 `X-Fbx2Glb-Textures` / `X-Fbx2Glb-Warnings` 里如实报数。
+  **被否决的替代方案**：用假 canvas 把 FBX 内嵌图片的字节原样塞进 GLB —— 导出器靠
+  `ctx.translate/scale(1,-1)` 翻转图片（glTF 的 UV 原点与 three 相反），直通会得到上下颠倒的贴图，
+  而且 `mimeType` 只能猜；产出一个「看起来有贴图但其实是坏的」文件比明说不支持更糟。
+- **HTTP 层**：上传**流式落盘**到 `data/tmp/`（上限 `PORTAL_MAX_FBX_MB`，默认 128MB）、**一次一个**（Promise
+  链排队，不拒绝）、**120 秒超时**（超时 `terminate()` + 504）、**未知参数直接 400**、数值范围**不在这里
+  钳制**（交给应用自己的 `clampDecimate`，与页面同规则，实际值在响应头里）、响应头**只放 ASCII**（中文
+  URI 编码——Node 拒绝非 Latin-1 的 header 值）、临时文件在 `finally` 里删。
+- **`GET /api/fbx2glb` 自描述**：参数列表与解析器接受的集合被断言为**完全相等**，所以文档不会和实现漂开。
 
 **启动即发现**：`registry.ts` 的 `loadRegistry()` 每次被调用时读取 `apps/*/manifest.json`，用 `normalizeManifest` 补全字段并按 `order` / `name` 排序。所以**无需缓存、无需重启**即可反映 `apps/` 的最新结构。
 
@@ -238,14 +293,17 @@
       "entry": "/apps/notes/",  // 可选，默认 /apps/<id>/
       "author": "...",          // 可选
       "sizeKb": 12,             // 可选
-      "orientation": "landscape" // 可选："landscape" | "portrait"；外壳据此显示「横屏」按钮
+      "orientation": "landscape", // 可选："landscape" | "portrait"；外壳据此显示「横屏」按钮
+      "assets": { "accepts": ["glb"] } // 可选：声明接收外部发布资产（扩展名，小写、不带点）。
+                                       // 声明了才有 data/assets/<id>/ 与 /assets/<id>/<name>；
+                                       // 发布端的目标列表就是从这里发现的（见第 4 节）
     }
 
 ### 运行约束
 
 - 应用页面是**原生 ESM**：`<script type="module" src="./main.js">`。
 - 资源引用用**相对路径**（`./styles.css`、`./main.js`），因为入口页可能被 iframe 以 `/apps/<id>/` 打开。
-- **门户 SDK 仍然不存在**，子应用不知道也不依赖门户；但**设置**是个例外：需要跨设备/跨重装保留的用户设置必须走 `GET/PUT /api/settings/<id>`（见第 4 节与 AGENTS.md 的「设置与用户数据」），客户端封装在 `shared/src/settings.ts`。子应用**只调这一个 HTTP 接口**，不引入任何门户代码依赖。
+- **门户 SDK 仍然不存在**，子应用不知道也不依赖门户；但有**两个**接口是例外，都用相对路径直接调：① **设置**（`GET/PUT /api/settings/<id>`，见第 4 节与 AGENTS.md 的「设置与用户数据」）——需要跨设备/跨重装保留的用户设置必须走它，客户端封装在 `shared/src/settings.ts`；② **外部资产**（`/api/assets/*` 读写、`/assets/<id>/*` 读取）——一个子应用把产物发布给另一个子应用用（见第 4 节），候选目标从 `/api/manifest` 发现而不是写死；③ **子应用自己的服务端 API**（今天是 `POST /api/fbx2glb/convert`，见第 4 节）——跨应用不能共享代码，能共享的只有 HTTP。三条都不引入门户代码依赖。
 - 各子应用的**应用内容**（如笔记正文）仍可用 `localStorage`；「设置」不允许只用 `localStorage`。
 - 新增/删除子应用 = 增删 `apps/<id>` 目录，然后 `npm run build`。
 
@@ -260,7 +318,8 @@
 5. **子应用必须能被单独打开**（`/<id>/index.html`），门户只是把它 `<iframe>` 起来而已。
 6. **零运行时依赖**：新增后端能力优先用 `node:*` 内置模块，别引入运行时 npm 包。
 7. **路径穿越防护**不可移除：`serveFile` 的 `path.resolve` + `startsWith` 检查是安全基线。
-8. **用户数据（设置）必须存在 `dist/` 之外**（当前是 `data/`）：`dist/` 每次构建被整体替换，放进去的数据会在下一次保存时消失。设置一律经 `/api/settings/:scope` 读写，不用 `localStorage`。
+8. **用户数据（设置与外部资产）必须存在 `dist/` 之外**（当前是 `data/`）：`dist/` 每次构建被整体替换，放进去的数据会在下一次保存时消失。设置一律经 `/api/settings/:scope` 读写，不用 `localStorage`；外部资产一律经 `/api/assets/<app>/*` 写、`/assets/<app>/*` 读，**不入 `apps/`、不入 `dist/`、不入库**（第 4 节给了三条理由）。
+9. **跨子应用的数据流只有一条路**：`data/assets/<appId>/`。子应用之间**不互相 import、不互相写文件**；数据交换一律经服务器（目录 + manifest 声明），因为浏览器的 `localStorage` 是所有 iframe 共享的，靠「各写各的键」是约定俗成而不是契约。
 
 ---
 
@@ -297,6 +356,18 @@
 - **"不受光的特效 + 环境光为 0"会把被特效覆盖的物体变成黑洞：让被点燃的东西自己发光**（射击子应用真机反馈「龙息弹外面一圈是红色亮光，中间反而变黑了」）：诊断是一条可以纯代码走完的链——火焰粒子是**不受光的加色四边形**（它们必须保持纯信号色，且要画在雾/分级之前），场景里真正的光源只有两盏方向光 + 上限 8 盏挂在**弹丸**上的点光，**火焰本身不点亮任何东西**；再加上环境光被要求调到 0，被点燃的敌人身体就收不到任何光、本来就是近黑；而它又是不透明几何，把背后的火焰挡住了。结果就是"亮圈 + 黑洞"。**修法不是把特效改成受光**（那会毁掉信号色与门控），而是**让被点燃的物体自发光**：按燃烧层数给角色材质一个自发光着色（`apps/shooter/src/chartint.ts`，纯函数，可 node 断言）。**要点**：① 自发光（three 的 `totalEmissiveRadiance`，加在光照之后）是"无论收到多少光都读得出来"的唯一手段，additive 特效做不到（它只能加在已经渲染出来的像素上，被不透明物体挡住的部分它加不到）；② 这种"按状态着色"的通道与既有的受击红闪**写同样的材质字段**，必须收敛到**一个写入者**（`toon.ts::applyCharTint(flashT, burnT)`），并且要定顺序（这里是先燃烧后红闪：瞬时提示要压在常态光之上）与去重（按两个通道成对去重，空闲角色每帧只花两次比较）；③ **"好不好看"依旧可以被量化**：这一条用上一轮建的调性模型把"黑洞"变成数字——同一敌人的身体亮度 0.178 → 0.555，而地砖 0.239，即从"比地面暗"变成"明显亮于地面"，同时断言不能过白。**通用规则**：一个暗场里任何"只加光、不发光"的特效，都要问一句"它旁边那个不透明物体自己会亮吗"。
 - **像素化后处理的稳定性不是"把分辨率调低"就自动有的：它同时依赖投影与相机对齐**（射击子应用这一轮）：常见做法是"渲染到小 target 再放大"，但那只是**块状**，画面一动就会在块网格上滑动、边缘发颤。稳定需要两个条件同时成立：① **正交投影**（`OrthographicCamera`）——世界每单位对应的像素全屏恒定，才存在唯一一个"块的世界尺寸"可对齐；透视下同一个块在不同深度覆盖不同世界尺寸，没有任何对齐量能同时成立；② **相机对齐到块网格**——正交下相机平移 `d` 使画面精确平移 `dot(d,right)`/`dot(d,up)` 像素，所以把相机位置沿它自己的 right/up 轴量化到整块，世界就会"整块地"移动而不是滑动（代价是玩家按块步进，这正是像素风的观感）。**这一条是可断言的**，而且必须断言，否则没人能看出实现是否真的稳定：`scripts/verify-postfx.mjs` 用 **vendor 的 three 摆一台真实的正交相机**、投影一个固定世界点，断言"亚块位移下**亚像素余数完全不变**、且只会在相邻两列之间跳"，并反向断言**不对齐时 61 个采样里有 50+ 个落在格点之外**——把"稳定性"变成一条会红的回归断言，而不是截图上的感觉。顺带一个几何事实值得记住：**平行投影与透视投影的可见地面互不包含**（平板在近处更宽、远处更窄，楔形相反），所以"换成正交不会少看东西"是错的；真正要守的是"阴影盒 100% 覆盖**当前**投影的可见地面"，测试也只断言这一条。
 
+- **「外部资产」不能放 `apps/` 也不能放 `dist/`——三条理由都是真实代价，不是洁癖**（本轮「一键把 GLB 发布到游戏目录」）：① `npm run dev` 的监督者轮询 `apps/`（第 5 节），把发布目标放在那下面意味着**每发一个模型就重建一次 + 重启一次服务器**，正在下载/加载的请求会被打断；② `build.mjs` 把 `apps/` 整棵拷进 `dist/`，一个 30MB 的 .glb 会在每次构建被复制一遍（换目录时再来一遍）；③ 发布是**运行时用户内容**，写进源码树会让 git 工作区变脏，而 GitHub **单文件 >100MB 直接拒推**——「发布一个买来的模型」不能有能力弄坏仓库。所以新增一个 `dist/` 之外的资产根 `data/assets/<appId>/`（gitignore + 不在轮询范围，与 `data/settings.json` 同一条规则），并用**逻辑 URL** `/assets/<appId>/<name>` 对外，使磁盘布局可改而不动游戏。**判断标准**：运行时被写、体积可能很大、内容属于用户 → 一律 `data/`。
+- **上传类接口要「流式 + 上限 + 先校验后原子替换」，否则一次坏上传就能毁掉一个已经能用的资产**（同上）：三个决定各自对应一个真实故障模式。① **流式落盘**（`createWriteStream`，不用把 `req` 缓冲成字符串）：上限 256MB 而宿主是手机，缓冲整包就是拿 RSS 换风险；超限时**继续 drain 但不写**（destroy 请求会连带杀掉响应，客户端只会看到网络错误，而不是那句「文件太大」）。② **校验发生在替换之前**：先写 `.<name>.<rand>.part`，GLB 头（magic / 版本 / **声明长度 = 实收长度**）过了才 `rename()`（同文件系统上是原子的）。于是被截断的上传、HTML 错误页、超限的半包都**不可能**覆盖掉已经发布好的文件——这正是「一键覆盖」敢做成同名直接覆盖的原因。③ **临时文件用隐藏名**：列表/删除只认合法名字（`^[A-Za-z0-9]…`），所以 `.<name>.<rand>.part` 天生不会被列出来，读路径也不需要到处想着它。
+- **加一个 MIME 条目会顺带改变别的路径的行为**（同上，很小但值得记）：为了让 `/assets/shooter/x.glb` 带正确的 `Content-Type`，`server/src/index.ts` 的 `MIME` 表加了 `.glb → model/gltf-binary`，于是**同时**让 dist 下的自带资产 `apps/shooter/assets/models/*.glb` 从 `application/octet-stream` 变成 `model/gltf-binary`。这是改进不是回归，但 `scripts/verify-assets.mjs` 把这条**一起断言**了：改共享表要意识到共享面。
+- **「导出器遇到空贴图会整份失败」，所以「缺贴图的槽会空着」必须由代码来成立**（本轮，由服务端 API 暴露出来）：
+  `GLTFExporter.processImage()` 对一个**没有像素**的贴图对象直接抛 `No valid image data found. Unable to
+  process texture.`——不是少一张图，而是**整个导出失败**（实测：一条 1 行的场景 + 一个 `image === undefined`
+  的贴图就复现）。浏览器里同样会发生（用户没提供外部贴图、或引用的是 `.tga`/`.dds` 占位），也就是说
+  「缺贴图的槽会空着」这句文档当时是**不成立**的。修法是把待补的槽在导出前**摘掉**
+  （`textures.ts::dropPendingTextureSlots()`，`material[slot] = null`），而且必须在 `finishTextureReport`
+  **之后** —— 分类报告要靠贴图对象上的名字（`texture.name`）才知道缺的是哪一个。**通用教训**：
+  「垃圾数据要优雅降级」这类承诺，只有在你**真的把那条路跑通过**之后才算数；这次是被一条不常走的输入
+  （转换 API 没有图片解码器）逼出来的。
 - **中间 render target 的「合成色彩空间」是一个设计决定，不是可以不管的细节**（射击子应用的像素化，三轮真机反馈才收敛）：three 只在**画到画布**时应用材质的 `linearToOutputTexel`；`getParameters()` 的规则是 `outputColorSpace = currentRenderTarget === null ? renderer.outputColorSpace : (rt.isXRRenderTarget ? rt.texture.colorSpace : LinearSRGBColorSpace)` —— 也就是**中间 target 默认是线性光缓冲**。这条默认值决定了 frame 里所有 `dst` 空间的混合（乘性暗角、黑色 alpha 遮罩、加色辉光）在**线性光**里发生，而不是在屏幕上；本项目所有观感（雾、调性、暗角、遮罩、辉光）都是按「屏幕上的值」调的，所以实测偏差很大（用户设置 `vignette 1.5 / vision.dim 0.25`：角落亮 32–39%、被遮暗的角落亮 49–62%、曳光弹反过来暗 74/255）。**三轮的教训按顺序记**：① 第一轮：blit 忘了做转换（把线性值当 sRGB 显示）→ 整屏偏暗、色相全错（实测地砖灰 `#83878b`→`#3a3e42`、Lv2 绿 `#4caf50`→`#126d14`、金 `#ffc107`→`#ff8801`、龙息弹芯 `#ff4200`→`#ff0e00`）；② 第二轮：在 blit 里补一次转换 —— 修好了**存进去的值**，但**混合仍然在线性空间**，于是「像素化后颜色都变亮了」；③ 第三轮（现在的做法）：**把离屏那一遍整体做成 display-referred** —— 全局覆盖 `ShaderChunk.colorspace_fragment`（原文本是 `gl_FragColor = linearToOutputTexel( gl_FragColor );`）为**无条件 sRGB 编码**（`gl_FragColor = sRGBTransferOETF( gl_FragColor );`），于是每个材质不管画到哪个 target 都写显示值，target 的合成与画布**逐位一致**，而 blit 退回**纯拷贝**（此时再放 `#include <colorspace_fragment>` 就是二次编码）。**为什么是全局覆盖**：场景里约 20 种材质（toon/粒子/血条/激光/光束/叠加面/描边…）必须全部一致，逐个打补丁迟早漏一个，混一点就是两个空间混在一帧里；`ShaderChunk` 在 vendor 的 three 里是**未被冻结**的普通对象，且 `#include <...>` 是**编译期**从它解析的，所以一次赋值就够。**画布路径逐字节不变**：对 sRGB 画布，`linearToOutputTexel` 生成的就是 `sRGBTransferOETF`（`LinearTosRGB` 也只是转调它）——这条等价被源码级断言钉住。**两个必须记住的坑**：① **裸 `clear()` 不跑任何着色器** —— 颜色背景（`scene.background` 是一个 Color）走的是 `state.buffers.color.setClear`，而且 three 给 render target 的 clear 喂的是**工作空间**分量，所以离屏那一遍必须换成「存的分量就是显示字节」的那个 Color，否则 `#0b0e14` 会被写成接近纯黑；② **别用「把 target 纹理标成 sRGB」来解决** —— 那会让采样端硬件解码，而且整条管线就变成依赖「驱动会不会在 framebuffer 写入时也转换」这种本环境无法验证的行为。**代价**：离屏那一遍每个片元多一次编码（一次 `pow`，此前是恒等），真机看帧率。**验证方式**：`verify-postfx.mjs` 用真实模型断言 display-referred 下暗角/遮暗/加色与直画路径**逐位相同**，并把线性 target 的偏差量作为回归守卫留在套件里。**还有一条同源的坑：合成空间一致 ≠ 画面一致，覆盖率也必须一致。** 「比一个 texel 还细的亮元素」（曳光/激光/光束/描边/火花）在**单采样**的离屏 target 里只有「全亮」或「全无」两种取值，而多采样的画布给的是真实覆盖率——实测一条 0.6 texel 宽的亮线在离屏那一遍读成 **+67% 亮**（或整条消失，取决于亚 texel 对齐），在「环境光 = 0」这种暗场里这些细亮元素就是画面最亮的内容，于是又被读成「像素化后颜色变亮」。**修法**：给离屏 target 加 `samples: 4`（`postfx.ts::PIXEL_MSAA_SAMPLES`），代价基本被「target 只有画布的 1/block² 像素」抵消；不支持多重采样 renderbuffer 的环境 three 会静默忽略该字段（退回旧行为，只会更接近）。**通用结论**：把画面搬到离屏缓冲时，**色彩空间、混合空间、覆盖率**是三件必须逐条对齐的事，少一条都会以「颜色不对」的形式暴露出来。**这条已经在真机上闭环**：强刷后把「像素化」在 0 / 2 之间拖，颜色完全一致（此前报了两轮的「颜色都变亮了」消失）。剩下未确认的只有离屏 4x MSAA 与多一次编码的帧率代价。
 - **「显示空间算子」必须自己钳定义域：编码不钳制，帧缓冲到算子之后才裁剪**（射击子应用，真机报「龙息弹/RPG 的红光照到别的地方发绿」，并明确纠正「和像素化后处理无关，关掉像素化也有」）：调色/暗角这类**按"屏幕上的值"写**的算子，很容易被当成"反正最后会 clip"而省掉输入钳制。但 `linearToOutputTexel()` 只是编码（`LinearTosRGB` 里没有 `clamp`），超白值会**完整地**进入算子，只有帧缓冲在**算子之后**才裁剪。对 mix 类算子（雾）无害；对 `mix( before, after, s )` 且 `s > 1`（外推）就是灾难：`after` 已被钳到 1 而 `before` 没有，于是**唯一那个超界的通道被按 `s × (before - 1)` 往下推**，红色通道塌到绿色通道之下——**红光渲染成绿光**。实测：龙息弹弹丸光下方 0.5 单位的地砖线性值 2.9（编码后 1.6），旧代码下显示 `#6a9b3a`（绿）；RPG 爆炸（强度 90）把 R 推到 **-0.67**。**修法只有一行**：`vec3 gBase = clamp( gl_FragColor.rgb, 0.0, 1.0 )`，此后 `mix` 的基准量用它。**两条通用规则**：① 任何"显示空间/输出空间"算子（调色、暗角、锐化、dither）都应在入口把输入折进自己的定义域——因为**上游从来不保证**，而下游的裁剪不算数；② **色彩空间的差异只会改变超界的幅度，不会改变符号**——所以同一个缺陷在"渲染进 render target"和"直画画布"两条路径上都会出现，只是幅度不同；用"换个后处理设置就复现/不复现"来判定根因会得出错误结论（这一轮先误判成像素化的问题，被用户纠正）。
 - **模型若比被建模的系统更宽容，它就会替系统圆谎**（同上这一轮，这是最有价值的一条）：`tone.ts::shade` 在编码处写了 `Math.min(1, …)`，而真实 shader 没有——于是**纯 CPU 模型一直报"不会发绿"，而真机一直发绿**，两者差了整整一轮反馈周期。**对策**：凡是"复现渲染管线"的模型，每一处钳制/饱和/舍入都要能指到渲染器里的同一处（本项目现在的写法是 `grade.ts` 自己钳输入，模型那行 `Math.min` 与 shader 的 `clamp` 是同一个钳制）；模型比系统宽松的地方就是**模型不可信的地方**，宁可让模型报错也不要让它替系统兜底。**顺带**：断言要留一条**旧算法的原样复现**（`verify-tone.mjs` 里留着未钳制的 kernel，断言它在同一输入上确实发绿）——否则"加了钳制"这条断言无法证明它修了什么。
@@ -412,7 +483,7 @@
     npm start            # 直接启动已构建的服务器（不 watch，改源码需重启）
     npm run launch       # = npm run build && npm start
 
-**环境变量**：`PORT`（默认 3000）、`HOST`（默认 0.0.0.0）。例：`PORT=8080 npm start`。
+**环境变量**：`PORT`（默认 3000）、`HOST`（默认 0.0.0.0）、`PORTAL_DATA_DIR`（`data/` 的根，默认 `<ROOT>/data`；相对值按 ROOT 解析）、`PORTAL_MAX_ASSET_MB`（单次发布上限，默认 256，夹在 1–4096）。例：`PORT=8080 npm start`。两个 `PORTAL_*` 的用途见第 4 节（测试隔离与上限）。
 
 **无后端依赖地验证（构建后）**：下面是**常用脚本清单**（列出的这些各自证明什么；完整清单见上面的文件树与各应用 README），**不是「每次改动都全跑」的门禁**——按改动范围挑（政策见 `AGENTS.md` §启动与验证 第 6 条，映射表在对应应用的 README，如 `apps/shooter/README.md` 的「改动 → 跑哪个脚本」）：
 
@@ -434,12 +505,13 @@
     node scripts/verify-shadow.mjs        # 主光阴影盒：矩阵与 three 一致 + 视野覆盖 100% + 亚 texel 不蠕动 + PCF-soft 的 acne/翻转率实测 + **偏航（基与 lookAt 相机一致、9 角度覆盖率 100%、yaw=0 逐位复现）**（22 项断言）
     node scripts/verify-gunner.mjs        # 枪手三档走位 + 原地站定 + 视线门控 + 预警→连发一梭子→换弹时序（发数 = 武器弹夹、梭内间隔 = 武器射速、梭间 = 换弹 + 预警）+ 武器复用负断言 + 同屏弹丸负荷预算 + 弹伤/无敌帧承伤上限 + 环形生成与配比（75 项断言）
     node scripts/verify-zoom-lock.mjs     # 外壳页面缩放锁（顶层 viewport meta + html/.appframe touch-action + iOS gesturestart + dist/ 同步，17 项断言）
-    node scripts/verify-fbx2glb.mjs       # FBX→GLB 子应用（apps/fbx2glb）：真样例走真管线（FBXLoader 解析 → 合并 + 骨架漂移重定向 + 覆盖率门 → GLTFExporter 写 GLB → 容器/自包含断言 → GLTFLoader 读回自检 → 缩放只发生一次）+ 命名/单位/骨架匹配/设置 schema 的纯规则 + **「不上传」源码级断言** + **DOM shim 启动真实 `main.js` 走完整用户流程**（样例→转换→下载不联网→改设置只发一次 PUT→多文件与合并两种模式→恢复默认真的落盘→混拖 FBX+图片按扩展名分流）+ **外部贴图（贴图与 FBX 分体：名字匹配 → `setURLModifier` 交给 loader → 占位槽回填 → 图片真被嵌进 GLB）** + **自动减面（meshoptimizer：只重写索引 + 压紧顶点，蒙皮/UV 不丢；1/3/8/264 个分组的回归门 + 「不能变多」的护栏）** + **输入格式探测（.glb/陌生格式给可读报错）** + **压缩贴图（等比目标尺寸 / 编码按槽位选择 / 共享图片只压一次 / 内存护栏 / 产物里图片数与 mimeType）**（456 项断言）
+    node scripts/verify-fbx2glb.mjs       # FBX→GLB 子应用（apps/fbx2glb）：真样例走真管线（FBXLoader 解析 → 合并 + 骨架漂移重定向 + 覆盖率门 → GLTFExporter 写 GLB → 容器/自包含断言 → GLTFLoader 读回自检 → 缩放只发生一次）+ 命名/单位/骨架匹配/设置 schema 的纯规则 + **「不上传」源码级断言** + **DOM shim 启动真实 `main.js` 走完整用户流程**（样例→转换→下载不联网→改设置只发一次 PUT→多文件与合并两种模式→恢复默认真的落盘→混拖 FBX+图片按扩展名分流）+ **外部贴图（贴图与 FBX 分体：名字匹配 → `setURLModifier` 交给 loader → 占位槽回填 → 图片真被嵌进 GLB）** + **自动减面（meshoptimizer：只重写索引 + 压紧顶点，蒙皮/UV 不丢；1/3/8/264 个分组的回归门 + 「不能变多」的护栏）** + **输入格式探测（.glb/陌生格式给可读报错）** + **压缩贴图（等比目标尺寸 / 编码按槽位选择 / 共享图片只压一次 / 内存护栏 / 产物里图片数与 mimeType）**（547 项断言，含向 `dist/apps/fbx2glb/main.js` 注入一个内存版发布 API 的端到端「发布→覆盖→删除」流程，以及第 15 节起真实服务器跑 `POST /api/fbx2glb/convert` 的成功与全部失败路径）
     curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/api/manifest
     curl -s http://127.0.0.1:3000/api/manifest
     curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/apps/notes/
     curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/apps/fbx2glb/            # FBX→GLB 子应用
     curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/apps/fbx2glb/assets/sample.fbx
+    node scripts/verify-assets.mjs        # **外部资产目录**：起真实服务器（PORTAL_DATA_DIR=临时目录 + 1MB 上限）跑 发布/列表/读取/覆盖/删除 + 全部拒绝路径（含「失败不毁旧文件」）+ 客户端名字清洗/目标解析（112 项断言）
 
 **设置 API（持久化）验证**：
 
@@ -455,6 +527,24 @@
     curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/data/settings.json   # 必须是 404
 
     持久化证明：写入后 `touch apps/shooter/src/camera.ts` 让 watcher 重建 + 重启服务器，再读一次仍然在。
+
+**转换 API 验证**（真实 URL，见第 4 节）：
+
+    curl -s http://127.0.0.1:3000/api/fbx2glb                                  # 自描述：参数/响应头/上限
+    curl -s -D- -X POST --data-binary @apps/fbx2glb/assets/sample.fbx \
+         'http://127.0.0.1:3000/api/fbx2glb/convert?name=idle.fbx' -o /tmp/idle.glb   # FBX → GLB（报告在响应头）
+    curl -s -X POST --data-binary @apps/fbx2glb/assets/sample-textured.fbx \
+         'http://127.0.0.1:3000/api/fbx2glb/convert' -D- | grep -i x-fbx2glb-textures   # 贴图被摘掉：requested=1;dropped=1
+
+**外部资产（发布）验证**（真实 URL，见第 4 节；下面的 `mini.glb` 是任意合法 GLB）：
+
+    curl -s http://127.0.0.1:3000/api/assets                                   # 谁接收 + 各自已发布什么
+    curl -s http://127.0.0.1:3000/api/assets/shooter                           # 单个应用
+    curl -s -X PUT --data-binary @mini.glb \
+         http://127.0.0.1:3000/api/assets/shooter/hero.glb                     # 发布（201；同名覆盖 200）
+    curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/assets/shooter/hero.glb   # 200 + model/gltf-binary
+    ls -l data/assets/shooter/                                                 # 磁盘上的真实位置（dist 之外）
+    curl -s -X DELETE http://127.0.0.1:3000/api/assets/shooter/hero.glb        # 删除
 
 ---
 
@@ -479,6 +569,14 @@
 ## 13. 已知限制 / 待办
 
 - 门户目前**无 PWA（离线/添加到主屏）**能力；子应用内容仍依赖各浏览器 `localStorage`。
+- **外部资产目录没有配额、没有鉴权、没有版本**：与设置存储同一档定位（单用户、本机、无鉴权），任何能访问 `:3000` 的人都能发布/覆盖/删除；文件按名字覆盖，没有历史版本，也没有「总大小上限」（只有**单文件** 256MB 上限与「不接收」的声明）。要清就 `DELETE`，或直接删 `data/assets/<app>/`。
+- **转换 API 不支持贴图、不支持合并多个 FBX、不支持 `.glb`/`.gltf` 输入**：贴图需要浏览器的图片解码器 +
+  canvas（页面里做），合并需要一个多文件容器（页面里多选即可），GLB 输入是另一件事（`GLTFLoader` 已经
+  vendored）。这三条都写在自描述端点与两个应用的 README 里，不是隐藏行为。
+- **转换 API 是单并发 + 120 秒超时 + 128MB 上限**（`PORTAL_MAX_FBX_MB` 可调）：排队而不是拒绝，超时被杀并回
+  504。手机上一次只跑一个转换是有意的（主线程还要服务游戏），代价是并发调用要等。
+- **发布出来的资产目前没有任何子应用会加载**：约定、目录、API 与文档都已就位（`apps/shooter/README.md` 里写了接入配方），但「游戏真的把 `data/assets/shooter/*.glb` 用起来」是待办（见该 README 的已知限制）。所以这条链今天证明的是**存储与传输**，不是**渲染**。
+- **`/assets/...` 不支持 `Range`/断点续传**：发布与读取都是整文件（glTF 加载器本来也是整文件拉取）。要支持得改 `streamAsset`。
 - **设置存储是单用户、无鉴权的**（与本机门户定位一致）：任何能访问 `:3000` 的人都能读写 `/api/settings`。**不要**往里面放密码/token 之类的机密。
 - **设置无版本迁移**：`data/settings.json` 是扁平 map，没有 `version` 字段，键被重命名/语义变更时只能由应用侧兼容或手工清理文件。当前规模（摇杆布局 + 摄像机高度 + 遮挡变暗 + 环境光 + 方向光 + 高度雾）不值得引入迁移框架。**注意「默认值可以随版本变化」这条容易被忽略**：稀疏覆盖的设计意味着"用户没调过的键跟着代码默认值走"，所以把环境光出厂值一路调到 **0**（1.05 → 0.42 → 0.14 → 0）时，**没拖过滑杆的用户**文件里根本没有 `light` 键，升级后**立刻**就是新观感——这是有意的（用户要的正是这个变化），但下次想「升级后观感不变」时，必须像相机那次一样让新默认等于旧硬编码值，而不是指望用户文件里记着什么。反过来，**已经用滑杆存过倍率的用户不会被新默认值影响**：那个倍率原样乘到新基强度上（相对语义不变、绝对值跟着变）。存「倍率」而不是存「绝对强度」就是为此选的——历次下调自动作用到已保存的设置上。**但这条有个真实的副作用，本项目已经踩到**：用户要求「把环境光改成 0」时，真机上那个方向因为存着 `light.portrait.ambient = 1.95`，实际强度是 `0.273` 而不是 0（另一个方向没有覆盖，才是 0）——**"把某个默认值改成 X"和"让用户看到 X"是两件事**，凡是"改成 0/关掉"这类需求，都要先 `GET /api/settings/<scope>` 看一眼有没有覆盖，并在回复里说清怎么清掉它。
 - **GLSL 在本环境无法编译验证**：射击子应用的高度雾走 `onBeforeCompile` 注入（`apps/shooter/src/fog.ts` + `toon.ts`）。`scripts/verify-fog.mjs` 能证明锚点存在且唯一、世界观感的注入点落在 `colorspace_fragment` 左边且夹在编码/解码之间、手写的 sRGB EOTF 与 three 的 `sRGBTransferOETF` 往返误差 < 1/255、世界坐标公式与引擎的 `worldpos_vertex` 等价、缺锚点时整体不补、以及 JS 侧公式正确，但**「GPU 收不收这段 GLSL」只能靠真机**。异常时的逃生开关是把「雾」拖到 0（混合变成空操作，不需要重编译），见 `apps/shooter/README.md`。
@@ -499,6 +597,13 @@
 |---|---|
 | 服务器路由 / MIME / 端口 / 请求体读取 | `server/src/index.ts` |
 | 设置存储（原子写、校验、串行队列） | `server/src/settings.ts` |
+| 外部资产存储（名字/路径校验、流式上传+上限、GLB 头校验、原子替换、列表/删除/流式读取） | `server/src/assets.ts`（路由在 `server/src/index.ts`；验证：`scripts/verify-assets.mjs`） |
+| 子应用自己的 HTTP API（FBX→GLB 转换端点：参数校验/落盘/队列/超时/响应头） | `server/src/fbx2glb.ts`（验证：`scripts/verify-fbx2glb.mjs` 第 15 节） |
+| 在 worker 线程里跑子应用模块、以及给它们补的最小「浏览器」（假 img/FileReader/self） | `server/src/fbx2glbWorker.ts`（转换逻辑本身在 `apps/fbx2glb/src/*`） |
+| 缺贴图的槽在导出前被摘掉（否则导出器整份失败） | `apps/fbx2glb/src/textures.ts::dropPendingTextureSlots()`（调用点：`src/convert.ts::parseFbx`） |
+| 外部资产目录（运行时生成） | `data/assets/<appId>/`（gitignore，勿放 `dist/`/`apps/`） |
+| 「发布到游戏」的客户端（目标发现、名字清洗、上传/列表/删除） | `apps/fbx2glb/src/publish.ts`（接线：`apps/fbx2glb/main.ts`；验证：`scripts/verify-assets.mjs` + `scripts/verify-fbx2glb.mjs` 第 11 节） |
+| 谁接收发布资产 | 各子应用自己的 `apps/<id>/manifest.json` 的 `assets.accepts`（归一化：`shared/src/types.ts`） |
 | 设置 API 的浏览器侧封装 | `shared/src/settings.ts` |
 | 设置文件（运行时生成） | `data/settings.json`（gitignore，勿放 `dist/`） |
 | 门户元信息 / 发现逻辑 / ROOT 常量 | `server/src/registry.ts` |

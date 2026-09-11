@@ -1,21 +1,30 @@
 /**
- * The 转换选项 / 预览 cards: DOM + persistence only. It owns no conversion logic and never imports a
- * renderer or the converter — it reads the controls, writes the matching override into the stored raw
- * object, and calls back with the EFFECTIVE values (AGENTS.md: the panel does not reach into engine
- * modules; the assembly layer, main.ts, forwards).
+ * The 转换选项 / 减面 / 贴图压缩 / 发布目标 / 预览 cards: DOM + persistence only. It owns no conversion
+ * logic and never imports a renderer or the converter — it reads the controls, writes the matching
+ * override into the stored raw object, and calls back with the EFFECTIVE values (AGENTS.md: the panel
+ * does not reach into engine modules; the assembly layer, main.ts, forwards).
  *
  * Persistence follows the shooter's pattern: `GET/PUT /api/settings/fbx2glb` (never localStorage),
  * sparse overrides, unknown keys preserved, 400 ms debounce, and a visible 「保存失败（仅本地生效）」
- * state instead of a silent drop. Two groups, each with its own 「恢复默认」 that clears only itself.
+ * state instead of a silent drop. Every settings card owns exactly one group and each group's
+ * 「恢复默认」 clears only itself.
+ *
+ * The publish card's OPTIONS are deliberately not this module's business: the candidate apps come from
+ * `/api/manifest` (main.ts fills the <select>), so here the stored VALUE is a bare app id and nothing
+ * in this file knows which apps exist.
  */
 import { loadSettings, saveSettings } from '../../../shared/src/settings.js';
 import {
-  type ConvertSettings, type DecimateSettings, type PreviewSettings, type RawSettings,
-  type TexturePackSettings,
-  DECIMATE_LIMITS, clearConvertGroup, clearDecimateGroup, clearPreviewGroup, clearTextureGroup,
-  createState, effectiveConvert, effectiveDecimate, effectivePreview, effectiveTexture,
-  hasConvertOverrides, hasDecimateOverrides, hasPreviewOverrides, hasTextureOverrides, orientationOf,
-  writeConvertOverride, writeDecimateOverride, writePreviewOverride, writeTextureOverride,
+  type ConvertSettings, type DecimateSettings, type PreviewSettings, type PublishSettings,
+  type RawSettings, type TexturePackSettings,
+  DECIMATE_LIMITS, clearConvertGroup, clearDecimateGroup, clearPreviewGroup, clearPublishGroup,
+  clearTextureGroup,
+  createState, effectiveConvert, effectiveDecimate, effectivePreview, effectivePublish,
+  effectiveTexture,
+  hasConvertOverrides, hasDecimateOverrides, hasPreviewOverrides, hasPublishOverrides,
+  hasTextureOverrides, orientationOf,
+  writeConvertOverride, writeDecimateOverride, writePreviewOverride, writePublishOverride,
+  writeTextureOverride,
   SPEED_MAX, SPEED_MIN, SPEED_STEP,
 } from './settings.js';
 
@@ -37,6 +46,9 @@ export interface PanelElements {
   packSize: HTMLSelectElement;
   packJpeg: HTMLInputElement;
   packReset: HTMLButtonElement;
+  /** 发布目标（选项由 main.ts 从 /api/manifest 填，这里只负责值与落盘）。 */
+  publishTarget: HTMLSelectElement;
+  publishReset: HTMLButtonElement;
   merge: HTMLInputElement;
   animations: HTMLInputElement;
   scale: HTMLSelectElement;
@@ -58,6 +70,8 @@ export interface PanelOptions {
   onDecimateChange: (s: DecimateSettings) => void;
   /** Called on every texture-packing change. */
   onTextureChange: (s: TexturePackSettings) => void;
+  /** Called on every publish-target change (so the UI can re-label buttons and re-list assets). */
+  onPublishChange: (s: PublishSettings) => void;
 }
 
 export interface PanelHandle {
@@ -66,6 +80,7 @@ export interface PanelHandle {
   preview(): PreviewSettings;
   decimate(): DecimateSettings;
   texture(): TexturePackSettings;
+  publish(): PublishSettings;
   /** Re-read the viewport orientation and re-apply (a hand-edited file may differ per orientation). */
   refresh(): void;
   /** Flush any pending save (used before a long conversion, so the value is not lost on navigation). */
@@ -83,6 +98,7 @@ export function createPanel(opts: PanelOptions): PanelHandle {
   function preview(): PreviewSettings { return effectivePreview(raw, orientation); }
   function decimate(): DecimateSettings { return effectiveDecimate(raw, orientation); }
   function texture(): TexturePackSettings { return effectiveTexture(raw, orientation); }
+  function publish(): PublishSettings { return effectivePublish(raw, orientation); }
 
   function setStatus(text: string, isError = false): void {
     els.status.textContent = text;
@@ -124,6 +140,14 @@ export function createPanel(opts: PanelOptions): PanelHandle {
     els.packSize.disabled = !tex.enabled;
     els.packReset.disabled = !hasTextureOverrides(raw);
 
+    const pub = publish();
+    // The <option> list is filled in by main.ts from /api/manifest. Setting a value with no matching
+    // option silently becomes "" in the DOM, which is exactly the 「自动」 fallback — and the SETTING the
+    // panel hands out is unaffected (main.ts re-applies the stored value after it fills the list, via
+    // refresh(); see the stale-id note in settings.ts).
+    els.publishTarget.value = pub.target;
+    els.publishReset.disabled = !hasPublishOverrides(raw);
+
     const p = preview();
     els.grid.checked = p.grid;
     els.bones.checked = p.bones;
@@ -140,6 +164,7 @@ export function createPanel(opts: PanelOptions): PanelHandle {
     opts.onPreviewChange(preview());
     opts.onDecimateChange(decimate());
     opts.onTextureChange(texture());
+    opts.onPublishChange(publish());
   }
 
   async function flush(): Promise<void> {
@@ -175,6 +200,7 @@ export function createPanel(opts: PanelOptions): PanelHandle {
   els.scale.addEventListener('change', () => change((r) => writeConvertOverride(r, 'scaleMode', els.scale.value)));
   els.naming.addEventListener('change', () => change((r) => writeConvertOverride(r, 'clipNaming', els.naming.value)));
 
+  els.publishTarget.addEventListener('change', () => change((r) => writePublishOverride(r, 'target', els.publishTarget.value)));
   els.pack.addEventListener('change', () => change((r) => writeTextureOverride(r, 'enabled', els.pack.checked)));
   els.packSize.addEventListener('change', () => change((r) => writeTextureOverride(r, 'maxSize', Number(els.packSize.value))));
   els.packJpeg.addEventListener('change', () => change((r) => writeTextureOverride(r, 'jpeg', els.packJpeg.checked)));
@@ -226,6 +252,7 @@ export function createPanel(opts: PanelOptions): PanelHandle {
   els.convertReset.addEventListener('click', () => resetGroup(clearConvertGroup, '转换选项已恢复默认'));
   els.decimateReset.addEventListener('click', () => resetGroup(clearDecimateGroup, '减面选项已恢复默认'));
   els.packReset.addEventListener('click', () => resetGroup(clearTextureGroup, '贴图压缩选项已恢复默认'));
+  els.publishReset.addEventListener('click', () => resetGroup(clearPublishGroup, '发布目标已恢复为「自动」'));
   els.previewReset.addEventListener('click', () => resetGroup(clearPreviewGroup, '预览选项已恢复默认'));
 
   const refresh = (): void => {
@@ -250,5 +277,5 @@ export function createPanel(opts: PanelOptions): PanelHandle {
     apply();
   })();
 
-  return { convert, preview, decimate, texture, refresh, flush };
+  return { convert, preview, decimate, texture, publish, refresh, flush };
 }

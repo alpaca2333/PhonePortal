@@ -15,7 +15,13 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { ROOT } from "./registry.js";
 
-export const DATA_DIR = path.join(ROOT, "data");
+export const DATA_DIR = process.env.PORTAL_DATA_DIR
+  // Absolute or relative to the project root (NOT the cwd: the dev supervisor spawns the server with
+  // cwd=ROOT, but a manual `node dist/server/src/index.js` from elsewhere must resolve the same way).
+  // The override exists so tests (scripts/verify-assets.mjs) can run a real server against a throwaway
+  // directory instead of writing into the user's live settings/assets. Default = data/ next to dist/.
+  ? path.resolve(ROOT, process.env.PORTAL_DATA_DIR)
+  : path.join(ROOT, "data");
 export const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 
 /** Scope names are app ids: URL-safe, no dots-only, bounded length. */

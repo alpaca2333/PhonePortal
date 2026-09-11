@@ -11,7 +11,9 @@
  *        → mergeScenes (pick the character, attach & rename the other files' clips)
  *        → resolveScale (units.ts) → GLTFExporter.parse → Blob
  *        → GLTFLoader.parse (self-check: what did we actually write?)
- *        → download link. No byte of it leaves the device.
+ *        → download link. No byte of the CONVERSION leaves the device: that path performs zero network
+ *          requests (asserted). 「发布」 is the one explicit exception — it PUTs the finished Blob to the
+ *          portal's own /api/assets/<app>/<name>, which stores it under data/assets/ for a game to load.
  */
 import { parseFbx, loadFbxFile, exportScene, selfCheck, downloadBlob, glbImageBytes,
   type ParsedFbx, type SelfCheck } from './src/convert.js';
@@ -21,7 +23,9 @@ import { formatBytes, outputFileName } from './src/names.js';
 import { resolveScale, scaleLabel, type ScaleDecision } from './src/units.js';
 import { createPanel, type PanelHandle } from './src/panel.js';
 import { createPreview, type PreviewHandle } from './src/preview.js';
-import type { ConvertSettings, DecimateSettings, PreviewSettings, TexturePackSettings } from './src/settings.js';
+import type {
+  ConvertSettings, DecimateSettings, PreviewSettings, PublishSettings, TexturePackSettings,
+} from './src/settings.js';
 import {
   decimateForExport, decimateSummaryText, type DecimateReport,
 } from './src/decimate.js';
@@ -30,6 +34,11 @@ import {
   IMAGE_EXTENSIONS, externalCounts, isImageFileName, providedFileNames, reportNeedsTextures,
   textureSummaryText, type TextureReport,
 } from './src/textures.js';
+import {
+  assetUrl, blockedReason, extensionOf, formatAssetTime, listPublished, loadPublishTargets,
+  publishAsset, publishNameFor, publishResultText, publishedSummary, removePublished, resolveTarget,
+  type PublishFile, type PublishTarget,
+} from './src/publish.js';
 
 const byId = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 
@@ -53,6 +62,11 @@ const texDropzone = byId<HTMLLabelElement>('texDropzone');
 const textureListEl = byId<HTMLUListElement>('textureList');
 const textureCountEl = byId<HTMLElement>('textureCount');
 const sampleTexBtn = byId<HTMLButtonElement>('sampleTexBtn');
+const pubTarget = byId<HTMLSelectElement>('pubTarget');
+const pubName = byId<HTMLInputElement>('pubName');
+const pubRefresh = byId<HTMLButtonElement>('pubRefresh');
+const pubState = byId<HTMLElement>('pubState');
+const pubList = byId<HTMLUListElement>('pubList');
 
 // ---- log -------------------------------------------------------------------------------------
 const MAX_LOG_LINES = 200;
@@ -282,6 +296,22 @@ playBtn.addEventListener('click', () => {
 let lastConvert: ConvertSettings | null = null;
 let lastDecimate: DecimateSettings | null = null;
 let lastTexture: TexturePackSettings | null = null;
+let lastPublish: PublishSettings | null = null;
+// Publish session state. Declared HERE (not next to the functions that use it) for the same reason
+// `lastConvert` is: createPanel() below calls onPublishChange synchronously while it is still being
+// constructed, so anything that callback touches must already be initialised — otherwise the module
+// dies with "Cannot access 'x' before initialization" before the page can render a single control.
+// (The DOM shim flow test in scripts/verify-fbx2glb.mjs caught exactly that on the first run.)
+let publishTargets: PublishTarget[] = [];
+let publishFiles: PublishFile[] = [];
+let publishing = false;
+/** Set while refreshTargets re-applies the stored target onto a fresh <option> list, so the panel's
+ *  callback does not kick off a second, overlapping list request. */
+let suppressPublishCallback = false;
+// Also declared up here (same reason): the publish callback renders the product rows, and that reads
+// the product list — which used to be declared further down, in the conversion section.
+const outputs: Output[] = [];
+const usedOutputNames = new Set<string>();
 const panel: PanelHandle = createPanel({
   els: {
     format: byId<HTMLSelectElement>('optFormat'),
@@ -301,6 +331,8 @@ const panel: PanelHandle = createPanel({
     packSize: byId<HTMLSelectElement>('optPackSize'),
     packJpeg: byId<HTMLInputElement>('optPackJpeg'),
     packReset: byId<HTMLButtonElement>('packReset'),
+    publishTarget: pubTarget,
+    publishReset: byId<HTMLButtonElement>('publishReset'),
     grid: byId<HTMLInputElement>('optGrid'),
     bones: byId<HTMLInputElement>('optBones'),
     speed: byId<HTMLInputElement>('optSpeed'),
@@ -322,6 +354,8 @@ const panel: PanelHandle = createPanel({
   onDecimateChange: (s: DecimateSettings) => { lastDecimate = s; updateConvertState(); },
   // 贴图压缩同样只在导出时发生（在克隆体上），这里只记下当前值。
   onTextureChange: (s: TexturePackSettings) => { lastTexture = s; },
+  // 发布目标只影响界面（按钮文案、已发布列表、目标目录），不参与转换 —— 记下来并刷新界面。
+  onPublishChange: (s: PublishSettings) => { lastPublish = s; onPublishTargetChanged(); },
 });
 
 // ---- conversion ------------------------------------------------------------------------------
@@ -339,9 +373,6 @@ interface Output {
   check: SelfCheck | { error: string };
   from: string;
 }
-
-const outputs: Output[] = [];
-const usedOutputNames = new Set<string>();
 
 function uniqueFileName(base: string, ext: string, suffix = ''): string {
   const first = outputFileName(base, ext, suffix);
@@ -426,6 +457,8 @@ function renderResults(): void {
       li.appendChild(warn);
     }
 
+    const actions = document.createElement('div');
+    actions.className = 'btn-row';
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'primary';
@@ -434,7 +467,32 @@ function renderResults(): void {
       downloadBlob(out.blob, out.name);
       log('已下载 ' + out.name, 'ok');
     });
-    li.appendChild(btn);
+    actions.appendChild(btn);
+
+    // 一键发布：目标 = 设置里的（默认「自动」= 第一个声明接收资产的子应用）。禁用时把原因写在行里
+    // ——手机上 title 提示是看不见的。
+    const ext = extensionOf(out.name);
+    const target = activeTarget();
+    const blocked = blockedReason(target, ext);
+    const pubBtn = document.createElement('button');
+    pubBtn.type = 'button';
+    pubBtn.className = 'primary';
+    pubBtn.textContent = target ? '发布到 ' + target.name : '发布到游戏';
+    pubBtn.disabled = blocked !== null;
+    if (target) {
+      pubBtn.title = `写入 data/assets/${target.id}/` +
+        `（游戏里按 ${assetUrl(target.id, publishNameFor(out.name, pubName.value, ext))} 读取）`;
+    }
+    pubBtn.addEventListener('click', () => { void publishOutput(out); });
+    actions.appendChild(pubBtn);
+    li.appendChild(actions);
+
+    if (blocked !== null) {
+      const why = document.createElement('div');
+      why.className = 'result-meta warn-text';
+      why.textContent = '· 发布不可用：' + blocked;
+      li.appendChild(why);
+    }
     resultsEl.appendChild(li);
   }
 }
@@ -545,6 +603,153 @@ async function convert(): Promise<void> {
     updateConvertState();
   }
 }
+
+// ---- publish (external assets; see src/publish.ts and server/src/assets.ts) -------------------
+// The published LIST belongs to the server (refetched, never cached) and the candidate apps belong to
+// /api/manifest. The state itself is declared up with the panel's, because the panel calls back INTO
+// this module while it is still being constructed (see the note there).
+/** The target a publish would go to right now: stored setting if it still exists, else the first. */
+function activeTarget(): PublishTarget | null {
+  return resolveTarget(lastPublish?.target ?? '', publishTargets);
+}
+
+function fillTargetOptions(): void {
+  // The <option> list is rebuilt from the manifest on every refresh; the 「自动」 entry always exists so
+  // the stored value '' is always selectable (see the panel's note about values with no option).
+  pubTarget.textContent = '';
+  const auto = document.createElement('option');
+  auto.value = '';
+  auto.textContent = publishTargets.length > 1 ? '自动（第一个接收资产的子应用）' : '自动';
+  pubTarget.appendChild(auto);
+  for (const t of publishTargets) {
+    const o = document.createElement('option');
+    o.value = t.id;
+    o.textContent = `${t.name}（${t.accepts.map((e) => '.' + e).join('/')}）`;
+    pubTarget.appendChild(o);
+  }
+}
+
+function renderPublished(): void {
+  pubList.textContent = '';
+  const target = activeTarget();
+  pubState.textContent = publishedSummary(target, publishFiles);
+  if (!target) return;
+  for (const file of publishFiles) {
+    const li = document.createElement('li');
+    // `pub-row` (not `ready`) on purpose: 「ready」 would add the file list's ✓ to the name, which means
+    // "parsed" there and nothing at all here.
+    li.className = 'file-row pub-row';
+    const name = document.createElement('span');
+    name.className = 'file-name';
+    name.textContent = file.name;
+    li.appendChild(name);
+    const meta = document.createElement('span');
+    meta.className = 'file-meta';
+    const when = formatAssetTime(file.mtime);
+    meta.textContent = `${formatBytes(file.bytes)}${when === '' ? '' : ' · ' + when} · ${assetUrl(target.id, file.name)}`;
+    li.appendChild(meta);
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'ghost small';
+    del.textContent = '✕';
+    del.title = '删除这个已发布的资产（游戏里如果引用了它就会读不到）';
+    del.addEventListener('click', () => { void deletePublished(target, file.name); });
+    li.appendChild(del);
+    pubList.appendChild(li);
+  }
+}
+
+async function refreshPublished(): Promise<void> {
+  const target = activeTarget();
+  if (!target) {
+    publishFiles = [];
+    renderPublished();
+    return;
+  }
+  const res = await listPublished(target.id);
+  if (!res.ok) {
+    publishFiles = [];
+    renderPublished();
+    pubState.textContent = '读不到已发布列表：' + res.error;
+    return;
+  }
+  publishFiles = res.value;
+  renderPublished();
+}
+
+/** Re-read /api/manifest, rebuild the target options and the published list. */
+async function refreshTargets(): Promise<void> {
+  const res = await loadPublishTargets();
+  if (res.ok) {
+    publishTargets = res.value;
+    if (publishTargets.length === 0) {
+      log('没有任何子应用声明接收发布资产（manifest 里的 assets.accepts），发布按钮会保持禁用', 'warn');
+    } else {
+      log('发布目标：' + publishTargets.map((t) => `${t.name}（${t.accepts.map((e) => '.' + e).join('/')}）`).join('、'));
+    }
+  } else {
+    publishTargets = [];
+    log('读不到子应用列表，发布不可用：' + res.error, 'warn');
+  }
+  fillTargetOptions();
+  // Re-apply the stored target now that the options exist (a value with no matching option would
+  // silently read as 「自动」). Suppressed callback: this function does the same follow-up work itself.
+  suppressPublishCallback = true;
+  try {
+    panel.refresh();
+  } finally {
+    suppressPublishCallback = false;
+  }
+  renderResults();
+  await refreshPublished();
+}
+
+/** The panel's publish-target callback (also fires while the panel is being constructed). */
+function onPublishTargetChanged(): void {
+  if (suppressPublishCallback) return;
+  renderResults();
+  void refreshPublished();
+}
+
+async function publishOutput(out: Output): Promise<void> {
+  if (publishing) return;
+  const target = activeTarget();
+  const ext = extensionOf(out.name);
+  const blocked = blockedReason(target, ext);
+  if (blocked !== null || !target) {
+    log('没法发布：' + (blocked ?? '没有接收资产的子应用'), 'warn');
+    return;
+  }
+  const name = publishNameFor(out.name, pubName.value, ext);
+  publishing = true;
+  pubState.textContent = '发布中…';
+  const res = await publishAsset(target.id, name, out.blob);
+  publishing = false;
+  if (!res.ok) {
+    log(`发布 ${name} 失败：` + res.error, 'error');
+    pubState.textContent = '发布失败：' + res.error;
+    await refreshPublished();
+    return;
+  }
+  log(publishResultText(res.value.name, res.value.bytes, target, res.value.replaced, res.value.url), 'ok');
+  log(`（文件在 data/assets/${target.id}/，重新构建不会丢；游戏里按 ${res.value.url} 读取）`);
+  await refreshPublished();
+}
+
+async function deletePublished(target: PublishTarget, name: string): Promise<void> {
+  const res = await removePublished(target.id, name);
+  if (!res.ok) {
+    log(`删除 ${name} 失败：` + res.error, 'error');
+    return;
+  }
+  log(`已删除已发布资产 ${target.id}/${name}`, 'ok');
+  await refreshPublished();
+}
+
+pubRefresh.addEventListener('click', () => { void refreshTargets(); });
+// The product rows' tooltip shows the URL the file WILL be published to, and that name comes from this
+// field — so typing here has to re-render them, or the hint would quietly describe the wrong file.
+pubName.addEventListener('input', () => renderResults());
 
 // ---- wiring ----------------------------------------------------------------------------------
 fileInput.addEventListener('change', () => {
@@ -705,7 +910,7 @@ clearBtn.addEventListener('click', () => {
   renderTextures();
   renderList();
   renderResults();
-  log('已清空列表');
+  log('已清空列表（已发布到游戏的资产不受影响，在下面的列表里单独删）');
 });
 
 convertBtn.addEventListener('click', () => { void convert(); });
@@ -716,4 +921,6 @@ renderTextures();
 renderResults();
 renderClips();
 log('选择 .fbx 文件即可开始；多个 Mixamo 动作文件可以合并成一个 glb。');
+// Publish targets come from the portal's own manifest API, so this app never names a game.
+void refreshTargets();
 log('FBX 的贴图如果是外部文件（Blender/3ds Max 导出常见），把那些图片也一起选进来，按文件名自动匹配。');

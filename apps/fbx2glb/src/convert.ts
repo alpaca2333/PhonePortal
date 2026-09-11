@@ -11,8 +11,8 @@
  */
 import type { LoadedFbx } from './merge.js';
 import {
-  applyTextureFallback, buildTextureIndex, createTextureSession, emptyTextureReport,
-  finishTextureReport,
+  applyTextureFallback, buildTextureIndex, createTextureSession, dropPendingTextureSlots,
+  emptyTextureReport, finishTextureReport,
   type TextureIndex, type TextureReport,
 } from './textures.js';
 
@@ -243,6 +243,9 @@ export async function parseFbx(buffer: ArrayBuffer, file: string, opts: ParseOpt
   report.timedOut = settle.timedOut;
   if (index) await applyTextureFallback(root, index, report, opts.loadImage ?? imageFromBlob);
   finishTextureReport(root, index ?? buildTextureIndex([]), report);
+  // LAST, and only after the report knows the names: a slot with no pixels makes GLTFExporter throw
+  // (see dropPendingTextureSlots), so it is detached instead of exported.
+  report.dropped = dropPendingTextureSlots(root);
   return { file, root, clips, textures: report, textureIndex: index };
 }
 

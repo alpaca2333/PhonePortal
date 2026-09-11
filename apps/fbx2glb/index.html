@@ -17,7 +17,8 @@
   <header id="top">
     <h1>FBX → GLB</h1>
     <p class="sub">在本机把 FBX 转成 glTF / GLB。多个 Mixamo 动作文件（每个文件一个动作）可以合并成
-      <strong>一个自带全部动作</strong>的角色文件 —— 整个转换只发生在这台设备的浏览器里，文件不会上传。</p>
+      <strong>一个自带全部动作</strong>的角色文件 —— 转换全程只发生在这台设备的浏览器里，没有任何文件
+      被上传。唯一会写服务器的动作是你按下的<strong>「发布」</strong>：把产物存进某个子应用的外部资产目录。</p>
   </header>
 
   <!-- Pick / drop. The <label> wraps the input so tapping anywhere in the zone opens the picker. -->
@@ -160,6 +161,37 @@
     <ul id="results" class="list"></ul>
   </section>
 
+  <!-- 发布到游戏：把产物写进另一个子应用的外部资产目录（服务器上的 data/assets/<应用>/，见
+       docs/TECHNICAL.md 第 12 节）。这是这个应用唯一会写服务器的功能，而且只在你按下产物行上的
+       「发布」时发生 —— 转换、减面、压贴图仍然零请求。 -->
+  <section class="card">
+    <div class="card-head">
+      <h2>发布到游戏</h2>
+      <button id="publishReset" class="ghost small" type="button">恢复默认</button>
+    </div>
+    <div class="row">
+      <label for="pubTarget">目标子应用</label>
+      <select id="pubTarget">
+        <option value="">自动</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="pubName">发布文件名</label>
+      <input id="pubName" type="text" placeholder="留空 = 用产物名" autocomplete="off" spellcheck="false" />
+    </div>
+    <div class="btn-row">
+      <button id="pubRefresh" class="ghost small" type="button">刷新已发布列表</button>
+      <span id="pubState" class="hint"></span>
+    </div>
+    <ul id="pubList" class="list"></ul>
+    <p class="hint">产物行上的「发布」把文件写进目标应用的<strong>外部资产目录</strong>
+      <code>data/assets/&lt;应用&gt;/</code>：它在 <code>dist/</code> 之外（重新构建 / 重启都不会丢），也
+      不在 <code>apps/</code> 里（所以发布不会触发重建，也不会把大文件复制进 dist）。游戏里按
+      <code>/assets/&lt;应用&gt;/&lt;名字&gt;.glb</code> 读取。候选应用来自各自的 manifest
+      （<code>assets.accepts</code>），这里不写死任何一个游戏。文件名会转成 ASCII 安全名（中文/空格 →
+      <code>-</code>），实际用到的名字会写进日志。</p>
+  </section>
+
   <section class="card">
     <div class="card-head"><h2>预览</h2></div>
     <div class="preview-wrap">
@@ -217,6 +249,15 @@
       <li><strong>减面</strong>：用 meshoptimizer（wasm 内嵌）做边折叠，<b>保留蒙皮与 UV</b>，只重写索引并压紧
         顶点；默认关闭。有 morph target 的网格会被跳过（减面会毁掉形变）。法线沿用原顶点法线，强减面后
         可能有轻微着色误差——真机上看一眼。</li>
+      <li><strong>发布</strong>：产物行上的「发布」按钮把 GLB 写进目标子应用的
+        <code>data/assets/&lt;应用&gt;/</code>，游戏用 <code>/assets/&lt;应用&gt;/&lt;名字&gt;.glb</code> 读取。
+        目标默认「自动」= 第一个在 manifest 里声明 <code>assets.accepts</code> 的应用。同名会覆盖（原子
+        替换：校验不通过时旧文件原封不动），前缀是「未压缩就发大模型」的那道门 —— 上限 256MB，超了会
+        让你先去压贴图。这是本应用唯一会写服务器的地方。</li>
+      <li><strong>命令行 / 脚本</strong>：同一件事还有一个 HTTP API —— <code>POST /api/fbx2glb/convert</code>，
+        请求体是 FBX、响应体就是 GLB，报告（骨骼/动作/缩放/贴图丢失数）走 <code>X-Fbx2Glb-*</code> 响应头，
+        <code>GET /api/fbx2glb</code> 是自描述。它<b>不处理贴图</b>（服务器端没有 canvas，槽会被摘掉并如实报数）,
+        要带贴图的 GLB 就用上面这个页面。</li>
       <li><strong>不做</strong>：不居中、不修朝向、不改骨骼名、不重定向不同骨架的动画、不重算法线、不压缩纹理。</li>
       <li><strong>预览</strong>：需要 WebGL（真机确认项），手机上大模型转动可能掉帧。</li>
     </ul>

@@ -32,7 +32,9 @@ portal/
 ├─ package.json            # 脚本：build / start / dev / launch
 ├─ tsconfig.json           # 全量 TypeScript 编译配置
 ├─ data/                   # 运行时用户数据（gitignore，不在 dist/ 内）
-│  └─ settings.json        # 设置存储（/api/settings 读写）
+│  ├─ settings.json        # 设置存储（/api/settings 读写）
+│  ├─ assets/<appId>/      # 外部资产目录：别的子应用「发布」进来的文件（/api/assets 写、/assets 读）
+│  └─ tmp/                 # 转换 API 的临时目录（上传的 FBX 与产出的 GLB，请求结束即删）
 ├─ scripts/
 │  ├─ build.mjs            # 原子构建：tsc → dist.next/，再换入 dist/（失败不动 dist/）
 │  ├─ dev-serve.mjs        # 开发监督者（npm run dev）：构建 + 启动 + watch 源码 → 重建重启
@@ -48,13 +50,17 @@ portal/
 │  ├─ preview-model.mjs    # 离线模型预览：把 .glb 的四个正交视图（前/左/后/上）光栅化成 PNG，零依赖、无需浏览器/GPU（绑定姿势，用来挑模型）
 │  ├─ verify-diag.mjs      # 卡顿归因验证（`?diag=1`）：GC / shader 编译 / 资源解析 / 长任务 / 相位的判定规则与反向用例 + DOM shim 驱动真实读数面板
 │  ├─ lib/glb.mjs          # 共享 .glb 读取器（节点 TRS + 与加载器相同的居中），供上面两个脚本复用
-│  ├─ verify-fbx2glb.mjs   # FBX→GLB 子应用验证：真实 FBXLoader/GLTFExporter 跑真样例（解析/合并重定向/自包含/自检/缩放/命名规则/设置 schema/「不上传」源码级断言）
+│  ├─ verify-fbx2glb.mjs   # FBX→GLB 子应用验证：真实 FBXLoader/GLTFExporter 跑真样例（解析/合并重定向/自包含/自检/缩放/命名规则/设置 schema/「不上传」源码级断言）+ DOM shim 跑一遍「发布→覆盖→删除」
+│  ├─ verify-assets.mjs    # 外部资产目录验证：起真实服务器（临时 data/ + 1MB 上限）跑发布/列表/读取/覆盖/删除 + 全部拒绝路径（截断/非 GLB/超限/坏名字/未声明接收），并断言失败的上传不会毁掉已发布的文件
 │  └─ trace-shooter.mjs    # 射击子应用行为快照（重构前后 diff 必须为空）
 ├─ server/                 # 后端（Node + TS）
 │  └─ src/
 │     ├─ index.ts          # HTTP 服务器：路由、静态服务、API
 │     ├─ registry.ts       # 扫描 apps/ 目录生成子应用注册表
-│     └─ settings.ts       # 设置存储：原子写 data/settings.json + 校验
+│     ├─ settings.ts       # 设置存储：原子写 data/settings.json + 校验
+│     ├─ assets.ts         # 外部资产存储：data/assets/<appId>/ 的流式上传（带上限）+ GLB 头校验 + 原子替换
+│     ├─ fbx2glb.ts        # 子应用自己的 HTTP API：POST /api/fbx2glb/convert（FBX 进、GLB 出）
+│     └─ fbx2glbWorker.ts  # 在 worker 线程里跑 apps/fbx2glb 的模块（+ 最小假 DOM）
 ├─ shell/                  # 门户外壳（前端）
 │  ├─ index.html           # 门户首页
 │  ├─ styles.css           # 门户样式（移动优先、深色）
@@ -68,7 +74,7 @@ portal/
    ├─ clock/               # ⏰ 时钟 + 秒表
    ├─ calculator/          # 🧮 计算器（内置表达式解析，无 eval）
    ├─ blackhole/           # 🕳️ 黑洞（Schwarzschild 光线追踪，WebGL2）
-   ├─ fbx2glb/             # 🧊 FBX → GLB 转换器（浏览器内转换，可把多个 Mixamo 动作合并成一个角色文件）
+   ├─ fbx2glb/             # 🧊 FBX → GLB 转换器（浏览器内转换，可把多个 Mixamo 动作合并成一个角色文件；一键把产物发布到游戏的外部资产目录）
    └─ shooter/             # 🎯 射击竞技场（室内掩体射击 + 视野遮挡 + 背包/物品槽位 + 备弹 + 护甲穿透等级 1–6 + 主副武器切换 + 分组设置面板：操控/画面/视野/光照）
 ```
 
@@ -165,7 +171,9 @@ apps/<你的应用id>/
   "order": 4,              // 排序，越小越靠前
   "version": "1.0.0",      // 版本号
   "entry": "/apps/todo/",  // 可选，默认为 /apps/<id>/
-  "orientation": "landscape" // 可选："landscape" | "portrait"；外壳据此显示「横屏」按钮
+  "orientation": "landscape", // 可选："landscape" | "portrait"；外壳据此显示「横屏」按钮
+  "assets": { "accepts": ["glb"] } // 可选：声明接收别的子应用「发布」的资产（扩展名，小写、不带点）。
+                             // 声明了才有 data/assets/<id>/ 目录与 /assets/<id>/<name> 读取地址
 }
 ```
 
@@ -183,12 +191,29 @@ apps/<你的应用id>/
 | GET  | `/api/settings`        | 读取全部设置（按 scope） |
 | GET  | `/api/settings/<scope>`| 读取某个 scope 的设置     |
 | PUT  | `/api/settings/<scope>`| 覆盖写入某个 scope 的设置（≤8KB JSON 对象） |
+| GET  | `/api/assets`          | 列出接收发布资产的子应用及其文件 |
+| GET  | `/api/assets/<id>`     | 某个子应用已发布的资产列表 |
+| PUT  | `/api/assets/<id>/<name>` | 发布一个资产（裸 body；校验扩展名 + GLB 头 + 上限后原子替换） |
+| DELETE | `/api/assets/<id>/<name>` | 删除一个已发布资产 |
+| GET  | `/assets/<id>/<name>`  | 读取已发布的资产（如游戏加载 `/assets/shooter/hero.glb`） |
+| GET  | `/api/fbx2glb`         | 转换 API 的自描述（参数、响应头、上限） |
+| POST | `/api/fbx2glb/convert` | **FBX 进 → GLB 出**：body 就是 FBX 文件，报告走 `X-Fbx2Glb-*` 响应头（贴图不支持，见下） |
 | GET  | `/`                    | 门户主页（shell）         |
 | GET  | `/apps/<id>/`          | 打开对应子应用           |
 
 > **设置持久化**：所有设置项都必须存到服务器（`data/settings.json`，不在 `dist/` 内），
 > 刷新页面 / 重启服务器 / 重新构建后都还在。**不要只用 `localStorage` 存设置** —— 详见
 > [AGENTS.md](AGENTS.md) 的「设置与用户数据」与 [docs/TECHNICAL.md](docs/TECHNICAL.md) 第 4 节。
+>
+> **子应用自己的 HTTP API**：子应用之间**不能互相 import**，所以除了目录（外部资产）之外，还有一条
+> 数据通道是 HTTP —— `apps/fbx2glb` 提供 `POST /api/fbx2glb/convert`（请求体是 FBX，响应体是 GLB，
+> 元数据在 `X-Fbx2Glb-*` 响应头里），服务器在 worker 线程里跑**这个子应用自己的模块**（不是第二套实现）。
+> **它不处理贴图**（Node 里没有图片解码器/canvas，槽会被摘掉并如实报数）——要带贴图的 GLB 请在页面里转。
+>
+> **外部资产（子应用之间传文件）**：一个子应用可以把产物「发布」给另一个子应用（当前是 FBX→GLB 转换器 →
+> 射击竞技场的一键发布）。文件落在 `data/assets/<子应用id>/`（同样是 `dist/` 之外、gitignore），浏览器按
+> `/assets/<子应用id>/<名字>` 读取；**接收方要在自己的 `manifest.json` 里声明 `assets.accepts`**，
+> 否则服务端拒收。详见 [docs/TECHNICAL.md](docs/TECHNICAL.md) 第 4 节的「外部资产目录」。
 
 ---
 
@@ -198,9 +223,9 @@ apps/<你的应用id>/
 - ⏰ **时钟**（`apps/clock`）：实时时钟 + 秒表。
 - 🧮 **计算器**（`apps/calculator`）：支持 `+ - × ÷ %`、括号解析的正确计算器，无需网络。
 - 🕳️ **黑洞**（`apps/blackhole`）：WebGL2 逐像素光线追踪，积分 Schwarzschild 光子测地线（已校验：捕获临界碰撞参数 ≈2.6rs），呈现真实引力透镜、吸积盘多普勒增亮/引力红移与光子环。
-- 🧊 **FBX → GLB**（`apps/fbx2glb`）：**在浏览器里把 FBX 转成 glTF/GLB**（three r160 本地 vendor 的 `FBXLoader` + `GLTFExporter` + `GLTFLoader`），支持**贴图与 FBX 分体时按文件名补齐并内嵌进产物**、**自动减面（vendored meshoptimizer，蒙皮/UV/多材质分组都保留）**、**压缩贴图（等比降分辨率 + 不透明贴图转 JPEG，体积的真正开关）**，以及**把多个 Mixamo 动作文件合并成一个自带全部动作的角色文件**（自动挑出带蒙皮的角色本体、按骨骼名匹配重定向另一个批次的骨架、按文件名给动作命名并处理 Mixamo 那个每次都叫 `mixamo.com` 的占位 take 名、按实测高度自动做厘米→米缩放），导出后**用 `GLTFLoader` 重新读回来自检**，全程**不上传**（有源码级断言）；带 WebGL 预览（无 WebGL 时降级为说明文字）。设置两组存服务器。
+- 🧊 **FBX → GLB**（`apps/fbx2glb`）：**在浏览器里把 FBX 转成 glTF/GLB**（three r160 本地 vendor 的 `FBXLoader` + `GLTFExporter` + `GLTFLoader`），支持**贴图与 FBX 分体时按文件名补齐并内嵌进产物**、**自动减面（vendored meshoptimizer，蒙皮/UV/多材质分组都保留）**、**压缩贴图（等比降分辨率 + 不透明贴图转 JPEG，体积的真正开关）**，以及**把多个 Mixamo 动作文件合并成一个自带全部动作的角色文件**（自动挑出带蒙皮的角色本体、按骨骼名匹配重定向另一个批次的骨架、按文件名给动作命名并处理 Mixamo 那个每次都叫 `mixamo.com` 的占位 take 名、按实测高度自动做厘米→米缩放），导出后**用 `GLTFLoader` 重新读回来自检**；**转换全程不上传**（有源码级断言），唯一的服务器写入是你按下的**「发布」**——把产物一键写进某个子应用的外部资产目录 `data/assets/<应用>/`，游戏里按 `/assets/<应用>/<名字>.glb` 读取（候选目标从 `/api/manifest` 发现，不写死任何游戏）。带 WebGL 预览（无 WebGL 时降级为说明文字）。设置五组（转换 / 减面 / 贴图压缩 / 发布目标 / 预览）存服务器。
   - 完整设计决策（含「导出缩放为什么必须加在成品 JSON 上」「`Box3.setFromObject` 对 SkinnedMesh 会二次乘」两个真坑）、设置键名表、许可证见 **[`apps/fbx2glb/README.md`](apps/fbx2glb/README.md)**。
-- 🎯 **射击竞技场**（`apps/shooter`）：**76×76 室内掩体射击（PvE 枪战）**，俯视角三人称（**左摇杆移动 / 右下大面积透明「视角区」转视角 / 独立开火键，角色永远朝摄像机前方**），Three.js（本地 vendor）+ glTF 骨骼动画 + 卡通渲染/角色描边。场景为 Kenney Furniture Kit 室内房间（CC0，49 个 `.glb` 仅 541KB），地上 **20 块掩体同时挡人、挡子弹、挡刀、挡火箭溅射**；敌人以**枪手为主**（见面先瞄 `0.5s`、预警线亮起、然后**照着自己那把冲锋枪的配置打空一梭子再换弹**，武器的射速/弹夹/换弹/散布全部复用 `weapons.ts` 的同一张表）+ 少量近战冲锋。**背包 / 武器 / 备弹 / 护甲穿透（1–6 级）**全部数据驱动（4 把武器：龙息喷 / 冲锋枪 / 火箭筒 / 砍刀），**视野遮挡与命中判定共用同一套视线函数**（能打到你的敌人一定看得见），模拟/渲染分离，设置分六组存服务器，`?diag=1` 打开内置卡顿剖析。声明了 `"orientation": "landscape"`。
+- 🎯 **射击竞技场**（`apps/shooter`）：**76×76 室内掩体射击（PvE 枪战）**，俯视角三人称（**左摇杆移动 / 右下大面积透明「视角区」转视角 / 独立开火键，角色永远朝摄像机前方**），Three.js（本地 vendor）+ glTF 骨骼动画 + 卡通渲染/角色描边。场景为 Kenney Furniture Kit 室内房间（CC0，49 个 `.glb` 仅 541KB），地上 **20 块掩体同时挡人、挡子弹、挡刀、挡火箭溅射**；敌人以**枪手为主**（见面先瞄 `0.5s`、预警线亮起、然后**照着自己那把冲锋枪的配置打空一梭子再换弹**，武器的射速/弹夹/换弹/散布全部复用 `weapons.ts` 的同一张表）+ 少量近战冲锋。**背包 / 武器 / 备弹 / 护甲穿透（1–6 级）**全部数据驱动（4 把武器：龙息喷 / 冲锋枪 / 火箭筒 / 砍刀），**视野遮挡与命中判定共用同一套视线函数**（能打到你的敌人一定看得见），模拟/渲染分离，设置分六组存服务器，`?diag=1` 打开内置卡顿剖析。声明了 `"orientation": "landscape"`，并在 manifest 里声明 `"assets": { "accepts": ["glb"] }`——**接收别的子应用发布进来的模型**（落盘 `data/assets/shooter/`，玩法上还没用起来，见它的 README）。
   - 完整设计决策、设置键名表、美术资源清单与踩坑记录见 **[`apps/shooter/README.md`](apps/shooter/README.md)**（本行只保留概览）。
 
 ---
@@ -212,6 +237,11 @@ apps/<你的应用id>/
 - 样式采用 CSS 变量 + 网格布局，适配手机安全区（`safe-area`）。
 - 子应用同源加载，天然隔离；`allow` 属性按需开放能力（定位/摄像头/麦克风）。
 - **设置持久化在服务器**：`GET/PUT /api/settings/:scope` → `data/settings.json`（原子写、写操作串行）。存储刻意放在 `dist/` 之外，因为构建会整体替换 `dist/`。`localStorage` 只用于应用内容（如笔记正文），不用于设置。
+- **跨子应用只有两条通道**：**外部资产目录**（`PUT /api/assets/<id>/<name>` → `data/assets/`）与
+  **HTTP API**（子应用可以用 `server/src/<app>.ts` 暴露一个端点；今天只有 `POST /api/fbx2glb/convert`）。
+  两者都不能替代「子应用之间不许互相 import」这条规则：HTTP 端点里跑的仍然是该应用自己的模块
+  （在 worker 线程里，`data/tmp/` 放临时文件）。
+- **外部资产也放 `data/`**：`data/assets/<appId>/` 是「一个子应用把文件交给另一个子应用」的唯一通道（`PUT /api/assets/<id>/<name>` 写入，`/assets/<id>/<name>` 读取）。它**不能**放 `apps/<id>/assets/`（dev 轮询会因此每次重建、构建会把大文件复制进 `dist/`、且会把二进制塞进 git），所以与设置同一条规则：运行时被写、体积可能大、内容属于用户 → 一律 `data/`。上传是**流式 + 上限 + 校验通过才原子替换**，坏上传不会毁掉已经能用的文件。
 
 ---
 

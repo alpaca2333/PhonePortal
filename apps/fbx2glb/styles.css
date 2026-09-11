@@ -124,6 +124,17 @@ button.small { padding: 5px 10px; font-size: 12px; }
   font: inherit;
   font-size: 13px;
 }
+.row input[type="text"] {
+  flex: 0 1 60%;
+  max-width: 60%;
+  background: var(--card-2);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 8px;
+  font: inherit;
+  font-size: 13px;
+}
 .row input[type="checkbox"] { width: 22px; height: 22px; accent-color: var(--accent); }
 .row input[type="range"] { flex: 1 1 auto; accent-color: var(--accent); }
 
@@ -150,6 +161,8 @@ button.small { padding: 5px 10px; font-size: 12px; }
 .file-meta { grid-column: 1 / -1; color: var(--fg-dim); font-size: 12px; }
 .file-row.error .file-meta { color: var(--bad); }
 .file-row.ready .file-name::after { content: " ✓"; color: var(--ok); }
+/* 已发布资产行：复用 file-row 的三列网格，但不带文件列表那套状态标记（✓ = 「已解析」在那里才有意义）。 */
+.file-row.pub-row .file-name::after { content: none; }
 .file-row.parsing .file-name::after { content: " …"; color: var(--warn); }
 
 .result-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }

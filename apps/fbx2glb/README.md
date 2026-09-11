@@ -1,7 +1,10 @@
 # 🧊 FBX → GLB（`apps/fbx2glb`）
 
 **在浏览器里把 FBX 转成 glTF / GLB，并把多个 Mixamo 动作文件合并成一个自带全部动作的角色文件。**
-解析、合并、贴图匹配、导出、自检全部发生在本机页面里——**模型文件一个字节都不上传**。
+解析、合并、贴图匹配、导出、自检全部发生在本机页面里——**转换过程一个字节都不上传**。
+唯一的例外是你按下的**「发布」**（见 3.13）：把成品一键写进某个子应用的外部资产目录，好让游戏直接加载。
+同一件事还有一条**不用打开页面**的路：`POST /api/fbx2glb/convert`（见 3.15）——把 FBX 作为请求体发过去，
+响应体就是 GLB，适合脚本 / 命令行 / 别的子应用调用。
 
 它存在的理由很具体：Mixamo 每个动作只能单独下载一个 FBX（而且每个文件的 take 都叫 `mixamo.com`），
 而消费方（比如 [射击子应用](../shooter/README.md) 的 `characters.ts`）需要的是**一个**自包含、
@@ -18,9 +21,32 @@
 2. **看报告**：每个文件立刻解析并列出「网格 / 骨骼 / 动作 / 包围盒高度 / 贴图」，解析失败的文件会标红并说明原因。
    如果日志说「贴图 X 没有提供」，就到下面的「配套贴图」里把那张图片选进来（见 3.10）——文件会被自动重新解析。
 3. **选选项**（默认值就是 Mixamo 工作流，一般不用改）：GLB · 合并 · 导出动画 · 自动缩放 · 按文件名命名。
+### 不用页面：一个 HTTP API（`POST /api/fbx2glb/convert`）
+
+```sh
+curl -X POST --data-binary @hero.fbx \
+     "http://localhost:3000/api/fbx2glb/convert?name=hero.fbx&scale=auto" -o hero.glb
+curl -X POST --data-binary @hero.fbx \
+     "http://localhost:3000/api/fbx2glb/convert?decimate=1&ratio=0.5" -o hero-low.glb -D-
+```
+
+请求体**就是 FBX 文件本身**（裸字节，不是 base64/JSON/multipart），响应体是 GLB，报告走**响应头**
+（`X-Fbx2Glb-Bones` / `-Clips` / `-Clip-Names` / `-Triangles` / `-Height` / `-Scale` / `-Decimate` /
+`-Textures` / `-Self-Check` / `-Warnings`，中文值 URL 编码）。参数：`name`、`scale`、`animations`、
+`decimate`、`ratio`、`error`、`lockBorder`（`pack=1` 会被拒——服务器端没有 canvas）。
+`GET /api/fbx2glb` 返回一份机器可读的说明（参数、响应头、上限）。
+
+**它不做贴图**（服务器端没有图片解码器/画布）：带贴图的 FBX 会被摘掉那些槽，`X-Fbx2Glb-Textures:
+requested=1;dropped=1` 与 `X-Fbx2Glb-Warnings` 会如实报出来。**要带贴图的 GLB 就用上面的页面**。
+设计理由、并发/超时/上限与真机注意事项见 3.15。
+
 4. **点「转换为 GLB」**：产物行显示动作名、缩放、以及**自检结果**（把写出的文件用 three 的 `GLTFLoader`
    重新读一遍，报出它实际看到的网格/骨骼/动作/高度）。
 5. **下载**：每个产物一个下载按钮（Blob URL，本地生成）。
+6. **发布（可选）**：产物行上还有一个「发布到 <目标应用>」按钮——把文件写进那个子应用的外部资产目录
+   （`data/assets/<应用>/`），游戏里按 `/assets/<应用>/<名字>.glb` 就能读到。目标来自各应用
+   `manifest.json` 的 `assets.accepts` 声明（默认「自动」= 第一个接收 `.glb` 的应用），所以这里
+   **不写死任何游戏**。详见 3.13。
 
 > 没有现成文件时有两个内置样例：「载入样例」是最小的 2 骨骼蒙皮盒子；「载入样例（外部贴图）」
 > 是一个**贴图与 FBX 分体**的样例（材质引用 `sample_body_diffuse.png`，按外部文件解析），
@@ -56,12 +82,16 @@ apps/fbx2glb/
 │  ├─ textures.ts        # 外部贴图：名字匹配（★纯）、LoadingManager 的 URL 重写、占位槽回填、贴图报告
 │  ├─ decimate.ts        # 自动减面：目标面数/跳过规则（★纯）+ meshoptimizer 调用 + 顶点压紧 + 减面报告
 │  ├─ texturepack.ts     # 压缩贴图：等比目标尺寸/编码选择（★纯）+ canvas 重采样 + 共享图片去重 + 内存护栏
-│  ├─ settings.ts        # ★纯：设置 schema（两组、默认值、稀疏覆盖、脏数据、钳制）
+│  ├─ settings.ts        # ★纯：设置 schema（五组、默认值、稀疏覆盖、脏数据、钳制）
+│  ├─ publish.ts         # 发布到子应用的外部资产目录：目标发现 / 名字清洗（★纯）+ 上传/列表/删除
 │  ├─ merge.ts           # 合并规则：挑本体、覆盖率门、重定向轨道、改名（用 three 的 AnimationClip）
 │  ├─ analyze.ts         # 场景报告：计数/尺寸/骨骼名/每个 clip 的未绑定轨道（three，无 DOM）
 │  ├─ convert.ts         # FBXLoader / GLTFExporter / GLTFLoader 封装 + GLB 容器数学（缩放）
 │  ├─ preview.ts         # ★唯一需要 WebGL 的模块：渲染 + OrbitControls + AnimationMixer
 │  └─ panel.ts           # 选项 DOM + 服务器持久化（防抖、恢复默认、失败降级）
+⋮
+server/src/fbx2glb.ts        # ★ 服务端那一半：POST /api/fbx2glb/convert（校验/落盘/队列/超时/响应头）
+server/src/fbx2glbWorker.ts  # ★ 在 worker 线程里跑**上面这些模块**（+ 最小假 DOM），见 3.15
 └─ assets/
    ├─ sample.fbx               # 手写 ASCII FBX 样例：2 骨骼蒙皮 + 两个 take（验证脚本的输入）
    ├─ sample-textured.fbx      # 同上，但材质引用一张**外部**贴图（贴图分体那条路的样例）
@@ -87,6 +117,9 @@ File ──arrayBuffer──▶ FBXLoader(带 URL 重写的 LoadingManager).pars
                               GLTFLoader.parse ──▶ 自检报告
                                           ▼
                               Blob URL ──▶ 下载（不回服务器）
+                                          │
+                          （只有你按「发布」时）──▶ PUT /api/assets/<应用>/<名字>.glb
+                                          └─▶ data/assets/<应用>/<名字>.glb ──▶ 游戏按 /assets/... 读取
 ```
 
 ---
@@ -304,7 +337,126 @@ Blender / 3ds Max 导出的 FBX 常常把贴图写成**同目录的外部文件*
 质量就得自己先编一遍、再让导出器编第二遍（双重 JPEG，画质和时间都亏）。**不做 KTX2/WebP**：导出器会把
 `image/webp` 降级成 PNG，KTX2 需要额外的编码器与运行时扩展。默认**关闭**（有损）。
 
-### 3.13 其他被否决的做法
+### 3.13 一键发布到子应用的外部资产目录（`data/assets/`）
+
+**要解决的问题**：转出来的 GLB 是给游戏用的，而「下载到手机 → 找到文件 → 手动塞进游戏目录」这段路
+在手机上极其难受（下载目录、SAF 权限、还要重新构建）。所以产物行上直接给一个**发布**按钮：写进目标
+子应用的外部资产目录，游戏下次加载就能用。
+
+**目录不在任何子应用的源码目录里，也不在 `dist/` 里**（这是本节最值得记住的一条，三条理由都是真实代价）：
+
+1. **不能放 `apps/<id>/assets/`**：`npm run dev` 的监督者轮询 `apps/`，放那里等于**每次发布都
+   重新 `tsc` 构建 + 重启服务器**（正在加载资源的请求会被打断）；而且 `build.mjs` 会把 `apps/` 整棵拷进
+   `dist/`，一个 30MB 的模型每次构建都被复制一遍。
+2. **不能放 `dist/`**：构建是 `rm dist` + `rename dist.next dist`，放进去的东西下次构建就没了
+   （和设置存储完全同一条规则，见 [TECHNICAL](../../docs/TECHNICAL.md) 第 4 节）。
+3. **也不该入库**：这是运行时用户内容，体积可能几十 MB；写进源码树会把 git 工作区弄脏，而
+   GitHub **单文件 >100MB 直接拒绝推送**——发布一个买来的模型不能有能力弄坏仓库。
+
+于是落在 **`data/assets/<appId>/<名字>`**（`data/` 已 gitignore，也**不在** dev 轮询范围内），
+对外用**逻辑 URL** `/assets/<appId>/<名字>` 读取。磁盘路径与 URL 刻意不同，这样以后换存储布局
+（分版本、分子目录）不用动任何游戏。
+
+**谁可以接收：由接收方自己声明**。接收方在 `manifest.json` 里写 `"assets": { "accepts": ["glb"] }`；
+没有声明这个字段的应用，服务端一律 **415** 拒收，而且**不会出现在本应用的目标下拉里** —— 目标列表是
+启动时 `GET /api/manifest` **发现**出来的（`src/publish.ts::loadPublishTargets`），所以：
+
+- 这个转换器**不认识任何游戏**（没有硬编码的 app id）；
+- 加一个能收资产的新子应用 = 改它自己的 `manifest.json` 一行，**服务器与转换器都不用动**。
+
+设置里的 `publish.target` 默认是空串 = **自动（第一个接收的应用）**，所以「一键」在默认状态下真的
+只有一次点击；存的是一个 app id 字符串，只能按形状校验（`APP_ID_RE`，与服务器的 scope 名同形）。
+如果那个应用后来不接收资产了，`resolveTarget()` 会**回落到第一个可用目标**而不是报错，并且
+**不重写存储**（那个应用可能只是暂时不在）。
+
+**写入是「流式 + 上限 + 校验通过才原子替换」**（服务端 `server/src/assets.ts`）：
+
+| 环节 | 做法 | 为什么 |
+| --- | --- | --- |
+| 传输 | 裸 GLB 字节（`PUT`，`Content-Type: model/gltf-binary`），**不是** base64 JSON、不是 multipart | 30MB 的模型走 base64 白白多 33%，而 multipart 要自己写解析器 |
+| 落盘 | 流式写到隐藏的 `.<名字>.<rand>.part`，边收边数 | 上限 256MB，缓冲整包 = 拿手机内存换风险 |
+| 校验 | GLB 头：magic `glTF` + 版本 2 + **声明总长 = 实收字节数** | 上传被截断时**当场** 400；否则要等游戏加载半个模型才炸，且报错难查 |
+| 提交 | `rename()` 原子替换（同名直接覆盖） | 上面任何一步失败，**已发布的那个文件字节与 mtime 都不变**——所以「同名覆盖」可以是默认行为，不需要确认框 |
+| 上限 | 单文件默认 256MB（`PORTAL_MAX_ASSET_MB` 可覆盖，夹在 1–4096） | 264MB 的角色本来就该先在 3.12 里压贴图；413 的文案直接这么说 |
+
+**名字会被转成 ASCII 安全名**（`publish.ts::sanitizeAssetName`）：名字要出现在 URL 与游戏代码里，
+所以 `我的角色(最终版).fbx` → `model.glb`，空格变 `-`，路径片段被剥掉，超长截断到 64 字符以内
+（服务器只接受 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`）。**实际用到的名字会写进日志**，也可以在
+「发布文件名」输入框里自己指定（同样过一遍清洗）。想保留原名就用英文名——这是刻意的取舍，
+「中文名 + URL 编码 + 游戏代码里的字面量」比一个短英文名更容易出事。
+
+**被否决的做法**：
+
+- **把产物直接写进 `apps/<id>/assets/`**（上面三条理由）；
+- **让转换器记住每个游戏的名字 / 硬编码 `shooter`**：那就把「加游戏」变成改这个应用；
+- **上传走 base64 JSON**：多 33%，而且要把整个文件读进字符串；
+- **发布时顺手做减面/压贴图**：发布的是**你看到的那份产物**（预览里是什么就发什么），
+  偷偷改一遍会让「下载的文件」和「发布的文件」不是同一个东西；
+- **同名时弹确认框 / 自动改名加序号**：服务端的原子替换让覆盖是安全的，而自动加序号会让游戏引用的
+  名字每次都变；UI 改成**在日志里明说「覆盖了同名资产」**（`replaced` 字段由服务端返回）；
+- **在浏览器里直接写文件系统**：没有这个能力（File System Access API 在 Android Chrome 上不给目录
+  句柄），而且那会绕过服务器侧的校验与上限。
+
+---
+
+### 3.15 服务端 API：同一套模块，在 worker 线程里再跑一遍（`POST /api/fbx2glb/convert`）
+
+**为什么是 HTTP，而不是「让别的子应用 import 这个子应用的模块」**：AGENTS.md 的硬规则是子应用之间
+**不互相 import、不互相写文件**，唯一的跨应用通道就是服务器。所以 API 只能长在门户服务器上：
+`server/src/fbx2glb.ts`（HTTP 层）+ `server/src/fbx2glbWorker.ts`（执行层）。它和「发布」那条路凑成
+一条完整的无浏览器流水线：`curl 转 → curl 发布 → 游戏读`（射击子应用的 README 里记着这条链）。
+
+**不写第二套转换实现**：worker 里 `import` 的就是 `dist/apps/fbx2glb/src/*.js` —— 页面加载的那几个
+文件（`convert.ts` / `merge.ts` / `analyze.ts` / `units.ts` / `decimate.ts` / `settings.ts`）。格式嗅探、
+骨架、缩放判定、容器写法、动作命名都只有一份真相；这个 API 只补环境。
+
+**为什么是 worker 线程**（而不是直接在服务器进程里跑）：① 门户服务器同时还要给游戏发资产，一次
+200MB 的 FBX 解析会把它卡住；② three 的堆炸掉时，崩的是那个 worker，服务器只是把这一个请求变成 500；
+③ worker 里跑完就 `terminate()`，不留下常驻内存。
+
+**给它补的「浏览器」只有四样**（都在 worker 顶部，逐条写清了理由）：`self`、`ProgressEvent`、
+`FileReader`（`GLTFExporter` 的二进制路径要用，`Blob.arrayBuffer()` 兜住）、以及一个
+`document.createElementNS('…','img')` —— 这个假 `<img>` **永远触发 `error`**，因为 Node 里没有图片解码器。
+于是「贴图加载不上」走的正是浏览器里「贴图文件找不到」那条路：报告里记下来，然后……
+
+**⚠️ 贴图槽在导出前必须被摘掉（这是本轮修掉的真实 bug）**：`GLTFExporter.processImage()` 遇到一个
+**没有像素**的贴图对象时会抛 `No valid image data found`，也就是**整个导出失败**——不是「少一张图」。
+浏览器里同样会发生（用户没提供外部贴图、或者引用的是 `.tga` 占位），所以原来的文档「没配上的槽会空着」
+其实是不成立的。修法在 `textures.ts::dropPendingTextureSlots()`：分类报告跑完之后把没有像素的槽
+`material[slot] = null`（**必须在 `finishTextureReport` 之后**，因为分类要靠贴图对象上的名字），
+材质保留自己的颜色。现在两边都成立：页面里缺贴图照样导出成功，API 里 `X-Fbx2Glb-Textures` 报
+`requested=N;dropped=N`，`X-Fbx2Glb-Warnings` 直接说「要带贴图请在页面里转换」。
+
+**为什么贴图不能像别的东西一样「顺手做掉」**：导出器要把图片画进 canvas 再重新编码（PNG/JPEG、
+等比缩放、共享去重都在那一步），而 canvas/图片解码是浏览器独有的。**试过的另一条路是「把 FBX 里内嵌的
+图片字节原样塞进 GLB」**（用一个假 canvas 把 `drawImage` 的源 Blob 直接还给 `toBlob`）：被否决，因为
+导出器靠 `ctx.translate/scale(1,-1)` 把图片**上下翻转**（glTF 的 UV 原点与 three 相反），直通会得到
+一张**上下颠倒**的贴图，而且 `mimeType` 要靠猜——产出一个「看起来有贴图但其实是坏的」文件比明说
+「这里没有贴图」更糟。**这轮不做，也不假装做。**
+
+**HTTP 层的几个决定**（`server/src/fbx2glb.ts`）：
+
+| 决定 | 为什么 |
+| --- | --- |
+| 上传**流式落盘**到 `data/tmp/`，不缓冲 | 上限 128MB（`PORTAL_MAX_FBX_MB`，比资产上限小：这是**源**文件，进内存后要膨胀好几倍），手机上的服务器不该为一个请求拿几十 MB RSS |
+| **一次一个**（Promise 链排队，不拒绝） | 手机上多核有限，three 的解析是单线程 CPU 活；四个并发只会让四个都更慢，同时拖着游戏的资产请求 |
+| **120 秒超时**，超时 `terminate()` 并回 504 | 队列必须能排空；卡死的转换不能永久占着唯一的位置 |
+| 参数**严格**：未知参数直接 400 | `?decmate=1` 这种 typo 会静默按默认值转换，比报错危险得多 |
+| 数值**不在这里钳制**，交给 worker 里 `settings.ts::clampDecimate` | 与页面用同一个钳制/吸附规则（越界的 `ratio=5` 会变成 1，并在响应头里报出实际值），服务器不需要知道减面的取值范围 |
+| 响应头用 **ASCII**（中文 URI 编码） | Node 拒绝写非 Latin-1 的 header 值——这不是风格问题，是硬约束 |
+| 临时文件在 `finally` 里删，失败路径也不留垃圾 | 已被断言（`data/tmp` 在跑完全部用例后为空） |
+
+**`GET /api/fbx2glb` 是自描述端点**（参数、响应头、上限、不支持的东西）。它存在的意义是「文档不会漂」：
+验证脚本直接断言**它的参数列表与解析器接受的参数集合完全相等**。
+
+**被否决的做法**：把转换做成 CLI 脚本（本环境与手机上都更难用，而且 CLI 一样没有 canvas）；
+让 worker 常驻复用（要处理半死状态与内存回收，收益只有几百毫秒）；
+支持合并多个 FBX（那需要一个多文件容器格式，而页面里点两下就行）；
+`.glb` 输入（`GLTFLoader` 已经 vendored，是另一件事）。
+
+---
+
+### 3.14 其他被否决的做法
 
 - **合并时把多个 FBX 的网格也拼进一个场景**：没有必要（角色只需要一套网格），而且会把多份骨架、
   多份材质、多份贴图都塞进产物。
@@ -339,7 +491,7 @@ Blender / 3ds Max 导出的 FBX 常常把贴图写成**同目录的外部文件*
 
 持久化走 `GET/PUT /api/settings/fbx2glb` → `data/settings.json`（**永不写 localStorage**，
 验证脚本有源码级断言）。稀疏覆盖：只存改过的键；保存时提交内存里的完整 scope 对象并原样保留
-未知键。两组各有自己的「恢复默认」，只清自己那组。
+未知键。**每组各有自己的「恢复默认」**，只清自己那组。
 
 | 组 | 键 | 取值 | 默认 | 生效时机 |
 | --- | --- | --- | --- | --- |
@@ -355,6 +507,7 @@ Blender / 3ds Max 导出的 FBX 常常把贴图写成**同目录的外部文件*
 | `texture` 贴图压缩 | `enabled` | 布尔 | `false` | 下一次转换（默认关闭：有损） |
 | | `maxSize` | 0 / 512 / 1024 / 2048 / 4096（其它数值吸附到最近预设） | `2048` | 下一次转换 |
 | | `jpeg` | 布尔（不透明贴图转 JPEG；带 alpha 与法线贴图始终 PNG） | `true` | 下一次转换 |
+| `publish` 发布 | `target` | 子应用 id，或 `""` = 自动（第一个接收 `.glb` 的应用） | `""` | 下一次发布（并立即刷新目标与已发布列表；形状不对的 id 丢弃回落到自动） |
 | `preview` 预览 | `grid` | 布尔 | `true` | 立即 |
 | | `bones` | 布尔 | `false` | 立即 |
 | | `speed` | 0.1–2，步长 0.1（越界钳制、NaN→1） | `1` | 立即（拖动实时预览，松手才落盘） |
@@ -417,6 +570,20 @@ Blender / 3ds Max 导出的 FBX 常常把贴图写成**同目录的外部文件*
 - **three 的 console 警告**：`GLTFExporter` 对 `MeshPhongMaterial`（FBXLoader 的常见产物）
   会打印「Use MeshStandardMaterial or MeshBasicMaterial for best results」；产物里仍是标准 PBR 材质。
   这些警告只进浏览器控制台，**不会**出现在页面日志里。
+- **发布链本身已完全验证，但「发布出去的资产有没有人用」还没有**：写入/读取/覆盖/删除/全部拒绝路径
+  由 `scripts/verify-assets.mjs` 起真实服务器跑过（112 项，含「失败不毁旧文件」），按钮接线由第 11 节
+  的 DOM shim 跑过；但**当前没有任何子应用会加载 `data/assets/<app>/` 里的文件**——[射击子应用](../shooter/README.md)
+  已经在 manifest 里声明接收 `.glb` 并写好了接入配方，代码还没接。所以这条链今天证明的是存储与传输。
+- **HTTP API 的贴图限制是硬限制**（见 3.15）：服务器端没有图片解码器/canvas，任何贴图槽都会被摘掉，
+  响应头如实报数。所以「用 API 转出来的模型没有贴图」是设计的一部分，不是 bug。**要带贴图就用页面。**
+- **API 的内存/时间只在 CPU 侧验证过**：`scripts/verify-fbx2glb.mjs` 第 15 节起真实服务器跑了
+  200/400/405/413/504 那几条路（含并发排队），但「手机上转一个 50MB 的 FBX 要多久 / 会不会被系统杀掉」
+  只能真机看。上限 `PORTAL_MAX_FBX_MB` 默认 128MB 就是为这个留的旋钮（嫌大就调小）。
+- **发布需要本机的门户服务器**：本应用从服务器读目标列表、把文件 PUT 给服务器。单独打开
+  `apps/fbx2glb/`（没有服务器）时，转换与下载照常可用，发布卡片会显示「读不到子应用列表，发布不可用」
+  并禁用按钮（已断言，不是崩溃）。
+- **发布的名字被折成 ASCII**（见 3.13）：中文/emoji 名会变成 `model.glb`，真实名字在日志里。
+- **同名发布会覆盖**：这是刻意选的（服务端原子替换 + 日志说明）。要保留旧版本就改「发布文件名」。
 - **没有批量重命名 UI**：命名靠文件名（3.5）。
 - **一次只有一个预览场景**：切文件会替换预览，不做多标签。
 - **多次产物要逐个点下载**：浏览器不允许多个下载同时触发（每个产物一行按钮，点了才生成 Blob URL）。
@@ -449,8 +616,10 @@ Blender / 3ds Max 导出的 FBX 常常把贴图写成**同目录的外部文件*
 
 | 改动 | 跑什么 |
 | --- | --- |
-| 本应用的任何逻辑 / DOM / 设置 / 样例 | `node scripts/verify-fbx2glb.mjs`（**456 项断言**，1 个脚本） |
-| `shared/src/settings.ts`、`server/`、`shell/`、`scripts/`、vendor | **全套**（21 个脚本；`verify-spawn-cost.mjs` 需要 `--expose-gc`） |
+| 本应用的任何逻辑 / DOM / 设置 / 样例 / **HTTP API** | `node scripts/verify-fbx2glb.mjs`（**547 项断言**，1 个脚本；第 15 节会起一个临时服务器） |
+| `textures.ts` 的槽位分类 / `dropPendingTextureSlots` | 同上（第 12 节：缺贴图必须**摘槽**而不是留着——留着会让导出器整个失败） |
+| 发布（`src/publish.ts`、接收方 manifest 的 `assets.accepts`、`/api/assets` 路由） | `node scripts/verify-assets.mjs`（**112 项**，起真实服务器）+ `verify-fbx2glb.mjs` 第 11 节 |
+| `shared/src/settings.ts`、`shared/src/types.ts`、`server/`、`shell/`、`scripts/`、vendor | **全套**（22 个脚本；`verify-spawn-cost.mjs` 需要 `--expose-gc`） |
 
 另外每次都做：`curl` 具体 URL、写明真机确认项（AGENTS.md 启动与验证 第 3、5 条）。
 
@@ -462,6 +631,11 @@ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3000/apps/fbx2glb/
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3000/apps/fbx2glb/assets/sample.fbx
 curl -s http://localhost:3000/api/manifest | grep -o '"id":"fbx2glb"[^}]*'
 curl -s http://localhost:3000/api/settings/fbx2glb
+curl -s http://localhost:3000/api/assets | head -c 300        # 哪个子应用接收发布资产
+curl -s http://localhost:3000/api/assets/shooter              # 射击竞技场里已发布的文件
+curl -s http://localhost:3000/api/fbx2glb                     # API 自描述（参数/响应头/上限）
+curl -s -D- -X POST --data-binary @apps/fbx2glb/assets/sample.fbx \
+     'http://localhost:3000/api/fbx2glb/convert?name=idle.fbx' -o /tmp/idle.glb   # FBX → GLB
 ```
 
 ### 这个脚本证明什么（而不是「跑过了」）
@@ -478,9 +652,11 @@ curl -s http://localhost:3000/api/settings/fbx2glb
    「缩放不动 BIN」也有断言（第 3.7 节那两个坑的回归门）；
 6. **规则就是文档里写的规则**：占位名表、去重（含 `hero`/`hero-2`…）、CJK 文件名、
    单位阈值两侧、骨架匹配的歧义拒绝、设置 schema（默认值/稀疏覆盖/脏数据/两组重置/速度钳制）；
-7. **不上传**：源码级断言「没有 `localStorage`」「没有 `XMLHttpRequest`/`FormData`」
-   「每一处 `fetch` 都只取 `./assets/` 下的内置样例资源」；`JS` 里取的每个 DOM id 都必须在
-   `index.html` 里存在；引用的每个 vendor addon 都必须在 dist 里；两份 vendor three 的 md5 相同。
+7. **「转换不上传」仍然是可断言的**：源码级断言「没有 `localStorage`」、
+   「没有 `XMLHttpRequest`/`FormData`」、「每一处 `fetch` 要么取 `./assets/` 下的内置样例、
+   要么是同源的 `/api/` 路由」、「源码里**没有任何绝对 URL**」（所以模型不可能被发到别的服务器）；
+   `JS` 里取的每个 DOM id 都必须在 `index.html` 里存在；引用的每个 vendor addon 都必须在 dist 里；
+   两份 vendor three 的 md5 相同。
 8. **贴图分体这条路也是端到端验证的**（脚本第 12 节）：名字匹配规则（路径/大小写/引号/主干名/重名/
    空引用）、URL 重写（内嵌 `data:` 与已解析的 `blob:` 必须原样通过、没配上的原样返回并记进报告）、
    占位槽回填（`.tga` 引用 + `.png` 文件按主干名补上、没有对应文件时不乱配）、真样例解析两遍
@@ -508,10 +684,29 @@ curl -s http://localhost:3000/api/settings/fbx2glb
 12. **构建新鲜度**：脚本第 0 节断言 `dist/apps/fbx2glb` 比源码新——本脚本读 `dist/`，陈旧的构建只会测到
    上一个版本（这次真踩过一次：改完 `main.ts` 没等 watcher 构建完就重跑，得到一次假失败）。
 
-8. **页面真的能跑**：`scripts/verify-fbx2glb.mjs` 最后一节用 DOM shim 启动**真实的 `dist/apps/fbx2glb/main.js`**
+13. **一键发布是端到端验证的**：服务端一侧由 `scripts/verify-assets.mjs`（112 项，**起真实服务器**、
+   `PORTAL_DATA_DIR` 指向临时目录、上限设成 1MB）钉住 —— manifest 的 `assets.accepts` 决定谁能收、
+   发布/列表/读取/覆盖/删除、字节级往返、`/assets` 与内置资产并存、穿越防护、以及**所有失败路径
+   （截断的 GLB / HTML 错误页 / 超限 / 坏名字 / 未声明接收）下已发布文件的字节与 mtime 都不变、
+   没有留下 `.part`**；客户端一侧由本脚本第 11 节用 DOM shim 驱动真实 `main.js` 跑过（见下）。
+14. **HTTP API 也是端到端验证的**（脚本第 15 节）：起一个真实服务器（`PORTAL_DATA_DIR` 指向临时目录、
+   `PORTAL_MAX_FBX_MB=1`），然后 —— 参数解析的纯规则（默认值、未知参数、`pack=1`、脏名字）；
+   **自描述端点的参数列表与解析器完全一致**；POST 样例 → 200 + `model/gltf-binary` + 字节数与响应头一致，
+   并把产物**读回来**断言 1 网格/2 关节/2 个动画且动作名是 `idle,idle-2`（按文件名去重，否则第二个
+   `mixamo.com` 永远取不到）；带贴图的样例 → 200 且 `X-Fbx2Glb-Textures: requested=1;dropped=1` 与
+   「请用页面」的告警、产物里确实**没有** images；失败路径逐条（垃圾 → 400、`.glb` 输入 → 400 并指路
+   `/api/assets`、空 body → 400、未知参数 → 400、`pack=1` → 400、超限 → 413、GET → 405、陌生子路径 →
+   404）；**所有请求都不在 `data/tmp` 留文件**；两个并发请求都拿到 200 且各自的动作名互不干扰。
+15. **页面真的能跑**：`scripts/verify-fbx2glb.mjs` 最后一节用 DOM shim 启动**真实的 `dist/apps/fbx2glb/main.js`**
    （元素 id 与标签直接从 `index.html` 解析，控件消失就会红），然后走一遍用户流程：载入样例 → 报告两骨骼两动作 →
    转换出一个 `sample.glb` → 点下载（断言**没有网络请求**）→ 改格式（断言 400ms 防抖后**只发一次 PUT 且两个方向都写**）
    → 再转一次（`.gltf`）→ 再加一个文件、关掉合并（两个产物各按自己的文件名命名）→ 打开合并（四个动作名齐全不重名）
    → 「恢复默认」（断言**真的再发一次 PUT**）→ 清空。没有 WebGL 时的降级路径也在这条流程里（预览 fallback 显示、画布隐藏）。
+   同一节还给 `fetch` 装了一个**内存版的发布 API**，于是能断言：启动时只读一次 `/api/manifest` 来发现目标、
+   下拉里只有声明了 `assets.accepts` 的应用、**转换与下载全程 0 次发布请求**、点一次「发布」= 恰好一次
+   `PUT /api/assets/shooter/sample.glb`（body 就是那个产物 Blob，`Content-Type: model/gltf-binary`）、
+   日志写出游戏要用的 URL、同名再发布显示「覆盖了同名资产」、`✕` 删除发 `DELETE`、把目标换成只收 `.png`
+   的应用后按钮禁用并在行内写出原因、`.gltf` 产物不能发到只收 `.glb` 的目标、以及**离线时降级为禁用 +
+   日志说明**（不是崩溃）。
 
 > ⚠️ **不证明**：预览好不好看、手势顺不顺手、大文件在手机上要多久——**需真机确认**（第 6 节）。

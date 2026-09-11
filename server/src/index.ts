@@ -8,6 +8,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DIST_ROOT, PORTAL, loadRegistry, getApp } from "./registry.js";
 import { MAX_BODY, isValidScope, readAll, readScope, validateValue, writeScope } from "./settings.js";
+import {
+  ASSET_URL_PREFIX, assetExtension, findAsset, listAssets, removeAsset, storeAsset, streamAsset,
+} from "./assets.js";
+import { apiDescription, handleConvert } from "./fbx2glb.js";
 import type { PortalManifest } from "../../shared/src/types.js";
 
 const PORT = Number(process.env.PORT ?? 3000);
@@ -30,6 +34,9 @@ const MIME: Record<string, string> = {
   ".wasm": "application/wasm",
   ".woff": "font/woff",
   ".woff2": "font/woff2",
+  // Published external assets (data/assets/<appId>/, see server/src/assets.ts).
+  ".glb": "model/gltf-binary",
+  ".gltf": "model/gltf+json",
 };
 
 function send(res: http.ServerResponse, code: number, body: string | Buffer, type = "text/plain; charset=utf-8") {
@@ -175,6 +182,115 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { scope, value: parsed });
       }
       return sendJson(res, 405, { error: "method not allowed" });
+    }
+
+    // --- API: published external assets (data/assets/<appId>/; see server/src/assets.ts) -----------
+    // A sub-app DECLARES its intake in its manifest (`"assets": { "accepts": ["glb"] }`), so writing
+    // into an app that never asked for it is refused instead of silently filling a directory nobody
+    // reads. Listing is public knowledge by design: the receiving game reads it to discover what it
+    // can load, and the converter reads it to show what is already published.
+    if (pathname === "/api/assets") {
+      if (req.method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+      const registry = await loadRegistry();
+      const apps = [];
+      for (const app of registry.apps) {
+        const accepts = app.assets?.accepts ?? [];
+        if (accepts.length === 0) continue; // only apps that accept published assets
+        apps.push({ id: app.id, name: app.name, accepts, files: await listAssets(app.id) });
+      }
+      return sendJson(res, 200, { root: "data/assets", apps });
+    }
+    const assetListMatch = pathname.match(/^\/api\/assets\/([^/]+)\/?$/);
+    if (assetListMatch) {
+      let appId: string;
+      try {
+        appId = decodeURIComponent(assetListMatch[1]!);
+      } catch {
+        return sendJson(res, 400, { error: "invalid app id encoding" });
+      }
+      const app = await getApp(appId);
+      if (!app) return sendJson(res, 404, { error: "unknown app: " + appId });
+      if (req.method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+      return sendJson(res, 200, {
+        app: { id: app.id, name: app.name },
+        accepts: app.assets?.accepts ?? [],
+        files: await listAssets(appId),
+      });
+    }
+    const assetItemMatch = pathname.match(/^\/api\/assets\/([^/]+)\/([^/]+)$/);
+    if (assetItemMatch) {
+      let appId: string;
+      let name: string;
+      try {
+        appId = decodeURIComponent(assetItemMatch[1]!);
+        name = decodeURIComponent(assetItemMatch[2]!);
+      } catch {
+        return sendJson(res, 400, { error: "invalid asset path encoding" });
+      }
+      if (req.method === "DELETE") {
+        const removed = await removeAsset(appId, name);
+        if (!removed) return sendJson(res, 404, { error: "no such asset: " + name });
+        return sendJson(res, 200, { app: appId, name, deleted: true });
+      }
+      if (req.method !== "PUT") return sendJson(res, 405, { error: "method not allowed" });
+      const app = await getApp(appId);
+      if (!app) return sendJson(res, 404, { error: "unknown app: " + appId });
+      const accepts = app.assets?.accepts ?? [];
+      if (accepts.length === 0) {
+        return sendJson(res, 415, { error: "子应用 " + appId + " 没有在 manifest 里声明 assets.accepts，不能接收发布资产" });
+      }
+      const ext = assetExtension(name);
+      if (ext === "" || !accepts.includes(ext)) {
+        return sendJson(res, 415, {
+          error: "只接受 " + accepts.map((e) => "." + e).join(" / ") + "（收到 " + (ext === "" ? "没有扩展名" : "." + ext) + "）",
+        });
+      }
+      const stored = await storeAsset(req, appId, name);
+      if (!stored.ok) return sendJson(res, stored.code, { error: stored.error });
+      // 201 = a new asset, 200 = an existing name replaced (the converter's 「发布」 button overwrites).
+      return sendJson(res, stored.replaced ? 200 : 201, {
+        app: appId, name, bytes: stored.bytes, replaced: stored.replaced, url: stored.url,
+      });
+    }
+
+    // --- API: the FBX→GLB converter's own endpoint (see server/src/fbx2glb.ts) ---------------------
+    // A sub-app may expose a server-side API for OTHER sub-apps to call — the only cross-app channel
+    // that does not violate "sub-apps never import each other". The conversion runs the app's own
+    // modules in a worker thread; the response is the finished GLB, streamed from data/tmp/.
+    if (pathname === "/api/fbx2glb") {
+      if (req.method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+      return sendJson(res, 200, apiDescription());
+    }
+    if (pathname === "/api/fbx2glb/convert") {
+      if (req.method !== "POST") return sendJson(res, 405, { error: "method not allowed (用 POST，body 就是 FBX 文件本身)" });
+      return handleConvert(req, res);
+    }
+
+    // --- Serve published assets: /assets/<appId>/<name> -> data/assets/<appId>/<name> ---------------
+    // Deliberately distinct from the per-app `apps/<id>/assets/` (which is vendored source, copied
+    // into dist/ by the build): this route never touches dist/ and survives every rebuild.
+    if (pathname.startsWith(ASSET_URL_PREFIX)) {
+      if (req.method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+      let appId = "";
+      let name = "";
+      try {
+        const rest = pathname.slice(ASSET_URL_PREFIX.length);
+        const cut = rest.indexOf("/");
+        if (cut > 0) {
+          appId = decodeURIComponent(rest.slice(0, cut));
+          name = decodeURIComponent(rest.slice(cut + 1));
+        }
+      } catch {
+        return send(res, 404, "Not found");
+      }
+      if (!name.includes("/")) {
+        const file = await findAsset(appId, name);
+        if (file) {
+          streamAsset(res, file.path, file.bytes, MIME["." + assetExtension(name)] ?? "application/octet-stream");
+          return;
+        }
+      }
+      return send(res, 404, "Not found");
     }
 
     // --- Portal shell at root: server-rendered so it works even without JS ---

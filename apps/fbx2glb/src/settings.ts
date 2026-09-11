@@ -7,10 +7,11 @@
  * SPARSE OVERRIDES: an untouched key is absent and keeps the built-in default, and unknown keys are
  * preserved verbatim on save (AGENTS.md「设置与用户数据」).
  *
- * Two groups, scope `fbx2glb`:
+ * Groups, scope `fbx2glb`:
  *   - `convert` → 转换选项: output format, merge, animations, unit scale, clip naming
  *   - `decimate` → 减面: on/off, keep ratio, error ceiling, silhouette lock
  *   - `texture`  → 贴图压缩: on/off, longest-edge cap, JPEG for opaque maps
+ *   - `publish`  → 发布到游戏: which sub-app receives the published asset ("" = first that accepts .glb)
  *   - `preview` → 预览: grid, bone display, playback speed
  *
  * ⚠️ THE `<orientation>` LEVEL IS PRESENT BUT HAS NO SEMANTICS HERE — and that is deliberate, so it
@@ -313,6 +314,77 @@ export function effectiveTexture(raw: RawSettings, o: Orientation): TexturePackS
 
 export function hasTextureOverrides(raw: RawSettings): boolean {
   return ORIENTATIONS.some((o) => Object.keys(readTextureOverrides(raw, o)).length > 0);
+}
+
+// ---------------------------------------------------------------------------
+// publish group —— 发布到游戏（外部资产目录）
+// ---------------------------------------------------------------------------
+// 「发布到哪个子应用」。默认是**空串 = 自动**（第一个在 manifest 里声明接收 .glb 的应用），所以这个
+// 转换器不需要知道任何别的应用叫什么 —— 候选列表来自 /api/manifest，写死一个应用 id 会让「换/加游戏」
+// 变成改这个应用。
+//
+// 旧值留着的策略：存的是 id 字符串，只能按**形状**校验（服务端 SCOPE_RE 的形状）；如果那个 id 现在
+// 已经不接收资产（应用被删/改了 manifest），publish.ts 的 resolveTarget() 会回落到第一个可用目标，
+// **不重写存储**——那个应用可能只是暂时不在，稀疏覆盖的语义就是这样（和别的组一致）。
+export interface PublishSettings {
+  /** 目标子应用 id；空串 = 自动（第一个接收 .glb 的应用）。 */
+  target: string;
+}
+
+export const PUBLISH_GROUP = 'publish';
+export const PUBLISH_KEYS = ['target'] as const;
+export type PublishKey = (typeof PUBLISH_KEYS)[number];
+
+/** 与 server/src/settings.ts 的 SCOPE_RE 同形：应用 id 就是 scope 名。 */
+export const APP_ID_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/i;
+
+export function publishDefaults(): PublishSettings {
+  return { target: '' };
+}
+
+/** 空串是合法值（自动）；其它必须是形状正确的应用 id，否则丢弃回落到自动。 */
+export function clampPublish(s: PublishSettings): PublishSettings {
+  const t = typeof s.target === 'string' ? s.target : '';
+  return { target: t === '' || APP_ID_RE.test(t) ? t : '' };
+}
+
+function validPublishValue(key: PublishKey, value: unknown): string | undefined {
+  return key === 'target' && typeof value === 'string' ? value : undefined;
+}
+
+export function readPublishOverrides(raw: RawSettings, o: Orientation): Partial<PublishSettings> {
+  const group = raw[PUBLISH_GROUP];
+  if (!isPlainObject(group)) return {};
+  const src = group[o];
+  if (!isPlainObject(src)) return {};
+  const out: Partial<PublishSettings> = {};
+  for (const k of PUBLISH_KEYS) {
+    const v = validPublishValue(k, src[k]);
+    if (v !== undefined) (out as Record<string, unknown>)[k] = v;
+  }
+  return out;
+}
+
+/** 写入两个方向（与其它组同理：目标应用与横竖屏无关）。 */
+export function writePublishOverride(raw: RawSettings, key: PublishKey, value: unknown): void {
+  if (!isPlainObject(raw[PUBLISH_GROUP])) raw[PUBLISH_GROUP] = {};
+  const group = raw[PUBLISH_GROUP] as Record<string, unknown>;
+  for (const o of ORIENTATIONS) {
+    if (!isPlainObject(group[o])) group[o] = {};
+    (group[o] as Record<string, unknown>)[key] = value;
+  }
+}
+
+export function clearPublishGroup(raw: RawSettings): void {
+  delete raw[PUBLISH_GROUP];
+}
+
+export function effectivePublish(raw: RawSettings, o: Orientation): PublishSettings {
+  return clampPublish({ ...publishDefaults(), ...readPublishOverrides(raw, o) });
+}
+
+export function hasPublishOverrides(raw: RawSettings): boolean {
+  return ORIENTATIONS.some((o) => Object.keys(readPublishOverrides(raw, o)).length > 0);
 }
 
 // ---------------------------------------------------------------------------
