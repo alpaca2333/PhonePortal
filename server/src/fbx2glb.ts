@@ -115,6 +115,38 @@ export function parseConvertQuery(params: URLSearchParams): ParseResult {
   };
 }
 
+/**
+ * Delete whatever is left in `data/tmp/` (called once at server startup).
+ *
+ * WHY A BOOT SWEEP IS NEEDED even though every request cleans up after itself: the cleanup runs in the
+ * request's `finally`, so a process that DIES mid-conversion leaves its scratch files behind — and that
+ * is not hypothetical here, it happened while developing this: `npm run dev` restarted the server
+ * because a source file changed while a conversion was in flight, and a 10KB `*.fbx` stayed in
+ * `data/tmp/` forever. At boot nothing can be in flight, so the directory is safe to empty.
+ */
+export async function cleanStaleTmp(): Promise<number> {
+  let names: string[] = [];
+  try {
+    names = await fs.readdir(TMP_DIR);
+  } catch {
+    return 0; // no directory yet — nothing to clean
+  }
+  let removed = 0;
+  for (const name of names) {
+    // `readdir` never returns a separator, so this cannot escape TMP_DIR. Directories are left alone.
+    try {
+      const full = path.join(TMP_DIR, name);
+      if ((await fs.stat(full)).isFile()) {
+        await fs.unlink(full);
+        removed++;
+      }
+    } catch {
+      // vanished or not removable — the next sweep will try again
+    }
+  }
+  return removed;
+}
+
 /** One conversion at a time (see the header). Never rejects: a failed job must not poison the queue. */
 let queue: Promise<unknown> = Promise.resolve();
 function enqueue<T>(job: () => Promise<T>): Promise<T> {

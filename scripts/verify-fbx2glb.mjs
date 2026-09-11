@@ -1849,6 +1849,10 @@ section('15. HTTP API：FBX 进，GLB 出');
   const net = await import('node:net');
   const { spawn } = await import('node:child_process');
   const tmpRoot = fsMod.mkdtempSync(new URL('../.verify-fbx2glb-api-', import.meta.url).pathname);
+  // Plant a stale scratch file BEFORE the server starts: that is exactly what a conversion killed by a
+  // dev-watcher restart leaves behind (it happened for real), and the boot sweep must remove it.
+  fsMod.mkdirSync(tmpRoot + '/tmp', { recursive: true });
+  fsMod.writeFileSync(tmpRoot + '/tmp/stale-from-a-crashed-conversion.fbx', 'stale');
   const port = await new Promise((resolve, reject) => {
     const srv = net.createServer();
     srv.on('error', reject);
@@ -1869,6 +1873,9 @@ section('15. HTTP API：FBX 进，GLB 出');
       try { up = (await fetch(base + '/api/portal')).ok; } catch { await new Promise((r) => setTimeout(r, 150)); }
     }
     check(up, '临时服务器起来了（PORT=' + port + '，PORTAL_DATA_DIR 指向临时目录）', up ? '' : serverLog.join(''));
+    check(!fsMod.existsSync(tmpRoot + '/tmp/stale-from-a-crashed-conversion.fbx'),
+      '启动时清掉上次遗留的临时文件（服务器死在转换中途留下的那些）',
+      fsMod.readdirSync(tmpRoot + '/tmp').join(','));
     if (!up) throw new Error('server did not start');
 
     // 自描述端点：参数列表必须与解析器认识的参数**完全一致**（否则文档就漂了）

@@ -11,7 +11,7 @@ import { MAX_BODY, isValidScope, readAll, readScope, validateValue, writeScope }
 import {
   ASSET_URL_PREFIX, assetExtension, findAsset, listAssets, removeAsset, storeAsset, streamAsset,
 } from "./assets.js";
-import { apiDescription, handleConvert } from "./fbx2glb.js";
+import { apiDescription, cleanStaleTmp, handleConvert } from "./fbx2glb.js";
 import type { PortalManifest } from "../../shared/src/types.js";
 
 const PORT = Number(process.env.PORT ?? 3000);
@@ -124,6 +124,11 @@ function renderShellHome(registry: PortalManifest): string {
   const cards = apps.map((a) => `<article class="card" style="--card-accent:${colorHex(a.color)}"><div class="card-icon">${escHtml(a.icon ?? "📦")}</div><h2>${escHtml(a.name)}</h2><p>${escHtml(a.description ?? "")}</p><a class="card-open" href="${escHtml(a.entry ?? "/apps/" + a.id + "/")}">打开 →</a></article>`).join("");
   return hero + `<div class="section-title">我的应用</div><main class="grid">${cards}</main><div class="footer">手机门户 v${escHtml(registry.portal.version ?? "0.0.0")} · 运行在本地设备</div>`;
 }
+
+// Scratch files from a conversion that was still running when this process died (a dev-watcher restart
+// is the usual cause) are removed once, at boot — at that moment nothing can be in flight.
+const staleTmp = await cleanStaleTmp();
+if (staleTmp > 0) console.log(`[fbx2glb] 清理了 ${staleTmp} 个上次遗留的转换临时文件（data/tmp/）`);
 
 const server = http.createServer(async (req, res) => {
   try {

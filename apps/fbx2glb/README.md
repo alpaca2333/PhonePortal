@@ -445,6 +445,7 @@ Blender / 3ds Max 导出的 FBX 常常把贴图写成**同目录的外部文件*
 | 数值**不在这里钳制**，交给 worker 里 `settings.ts::clampDecimate` | 与页面用同一个钳制/吸附规则（越界的 `ratio=5` 会变成 1，并在响应头里报出实际值），服务器不需要知道减面的取值范围 |
 | 响应头用 **ASCII**（中文 URI 编码） | Node 拒绝写非 Latin-1 的 header 值——这不是风格问题，是硬约束 |
 | 临时文件在 `finally` 里删，失败路径也不留垃圾 | 已被断言（`data/tmp` 在跑完全部用例后为空） |
+| **启动时清空 `data/tmp/`** | 请求级清理挡不住「进程死在转换中途」——真机开发时就撞上过：`npm run dev` 因为文件改动重启服务器，正在转换的那个请求的 `.fbx` 永久留在那里。启动那一刻不可能有转换在跑，所以整目录清空是安全的 |
 
 **`GET /api/fbx2glb` 是自描述端点**（参数、响应头、上限、不支持的东西）。它存在的意义是「文档不会漂」：
 验证脚本直接断言**它的参数列表与解析器接受的参数集合完全相等**。
@@ -616,7 +617,7 @@ Blender / 3ds Max 导出的 FBX 常常把贴图写成**同目录的外部文件*
 
 | 改动 | 跑什么 |
 | --- | --- |
-| 本应用的任何逻辑 / DOM / 设置 / 样例 / **HTTP API** | `node scripts/verify-fbx2glb.mjs`（**547 项断言**，1 个脚本；第 15 节会起一个临时服务器） |
+| 本应用的任何逻辑 / DOM / 设置 / 样例 / **HTTP API** | `node scripts/verify-fbx2glb.mjs`（**548 项断言**，1 个脚本；第 15 节会起一个临时服务器） |
 | `textures.ts` 的槽位分类 / `dropPendingTextureSlots` | 同上（第 12 节：缺贴图必须**摘槽**而不是留着——留着会让导出器整个失败） |
 | 发布（`src/publish.ts`、接收方 manifest 的 `assets.accepts`、`/api/assets` 路由） | `node scripts/verify-assets.mjs`（**112 项**，起真实服务器）+ `verify-fbx2glb.mjs` 第 11 节 |
 | `shared/src/settings.ts`、`shared/src/types.ts`、`server/`、`shell/`、`scripts/`、vendor | **全套**（22 个脚本；`verify-spawn-cost.mjs` 需要 `--expose-gc`） |

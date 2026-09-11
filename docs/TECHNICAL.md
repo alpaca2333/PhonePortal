@@ -206,6 +206,9 @@
   钳制**（交给应用自己的 `clampDecimate`，与页面同规则，实际值在响应头里）、响应头**只放 ASCII**（中文
   URI 编码——Node 拒绝非 Latin-1 的 header 值）、临时文件在 `finally` 里删。
 - **`GET /api/fbx2glb` 自描述**：参数列表与解析器接受的集合被断言为**完全相等**，所以文档不会和实现漂开。
+- **`data/tmp/` 在服务器启动时被清空**：请求级 `finally` 挡不住「进程死在转换中途」——真机上撞到过
+  （`npm run dev` 因源码改动重启，正在转换的请求留下的 `.fbx` 永久躺在那里）。启动那一刻不可能有转换
+  在跑，所以整目录清空是安全的；验证脚本会在起服务器前放一个「上次遗留」的文件，断言它启动后就没了。
 
 **启动即发现**：`registry.ts` 的 `loadRegistry()` 每次被调用时读取 `apps/*/manifest.json`，用 `normalizeManifest` 补全字段并按 `order` / `name` 排序。所以**无需缓存、无需重启**即可反映 `apps/` 的最新结构。
 
@@ -505,7 +508,7 @@
     node scripts/verify-shadow.mjs        # 主光阴影盒：矩阵与 three 一致 + 视野覆盖 100% + 亚 texel 不蠕动 + PCF-soft 的 acne/翻转率实测 + **偏航（基与 lookAt 相机一致、9 角度覆盖率 100%、yaw=0 逐位复现）**（22 项断言）
     node scripts/verify-gunner.mjs        # 枪手三档走位 + 原地站定 + 视线门控 + 预警→连发一梭子→换弹时序（发数 = 武器弹夹、梭内间隔 = 武器射速、梭间 = 换弹 + 预警）+ 武器复用负断言 + 同屏弹丸负荷预算 + 弹伤/无敌帧承伤上限 + 环形生成与配比（75 项断言）
     node scripts/verify-zoom-lock.mjs     # 外壳页面缩放锁（顶层 viewport meta + html/.appframe touch-action + iOS gesturestart + dist/ 同步，17 项断言）
-    node scripts/verify-fbx2glb.mjs       # FBX→GLB 子应用（apps/fbx2glb）：真样例走真管线（FBXLoader 解析 → 合并 + 骨架漂移重定向 + 覆盖率门 → GLTFExporter 写 GLB → 容器/自包含断言 → GLTFLoader 读回自检 → 缩放只发生一次）+ 命名/单位/骨架匹配/设置 schema 的纯规则 + **「不上传」源码级断言** + **DOM shim 启动真实 `main.js` 走完整用户流程**（样例→转换→下载不联网→改设置只发一次 PUT→多文件与合并两种模式→恢复默认真的落盘→混拖 FBX+图片按扩展名分流）+ **外部贴图（贴图与 FBX 分体：名字匹配 → `setURLModifier` 交给 loader → 占位槽回填 → 图片真被嵌进 GLB）** + **自动减面（meshoptimizer：只重写索引 + 压紧顶点，蒙皮/UV 不丢；1/3/8/264 个分组的回归门 + 「不能变多」的护栏）** + **输入格式探测（.glb/陌生格式给可读报错）** + **压缩贴图（等比目标尺寸 / 编码按槽位选择 / 共享图片只压一次 / 内存护栏 / 产物里图片数与 mimeType）**（547 项断言，含向 `dist/apps/fbx2glb/main.js` 注入一个内存版发布 API 的端到端「发布→覆盖→删除」流程，以及第 15 节起真实服务器跑 `POST /api/fbx2glb/convert` 的成功与全部失败路径）
+    node scripts/verify-fbx2glb.mjs       # FBX→GLB 子应用（apps/fbx2glb）：真样例走真管线（FBXLoader 解析 → 合并 + 骨架漂移重定向 + 覆盖率门 → GLTFExporter 写 GLB → 容器/自包含断言 → GLTFLoader 读回自检 → 缩放只发生一次）+ 命名/单位/骨架匹配/设置 schema 的纯规则 + **「不上传」源码级断言** + **DOM shim 启动真实 `main.js` 走完整用户流程**（样例→转换→下载不联网→改设置只发一次 PUT→多文件与合并两种模式→恢复默认真的落盘→混拖 FBX+图片按扩展名分流）+ **外部贴图（贴图与 FBX 分体：名字匹配 → `setURLModifier` 交给 loader → 占位槽回填 → 图片真被嵌进 GLB）** + **自动减面（meshoptimizer：只重写索引 + 压紧顶点，蒙皮/UV 不丢；1/3/8/264 个分组的回归门 + 「不能变多」的护栏）** + **输入格式探测（.glb/陌生格式给可读报错）** + **压缩贴图（等比目标尺寸 / 编码按槽位选择 / 共享图片只压一次 / 内存护栏 / 产物里图片数与 mimeType）**（548 项断言，含向 `dist/apps/fbx2glb/main.js` 注入一个内存版发布 API 的端到端「发布→覆盖→删除」流程，以及第 15 节起真实服务器跑 `POST /api/fbx2glb/convert` 的成功与全部失败路径）
     curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/api/manifest
     curl -s http://127.0.0.1:3000/api/manifest
     curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/apps/notes/
