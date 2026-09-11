@@ -95,6 +95,35 @@
     <button id="convertBtn" class="primary" type="button" disabled>转换</button>
   </section>
 
+  <!-- 自动减面。默认关闭：减面是有损的，不该替用户改模型。目标比例是"想保留多少"，
+       误差上限才是真正的限制项（误差先到就先停），所以两个滑杆配一句话解释。 -->
+  <section class="card">
+    <div class="card-head">
+      <h2>减面（可选）</h2>
+      <button id="decimateReset" class="ghost small" type="button">恢复默认</button>
+    </div>
+    <div class="row">
+      <label for="optDecimate">自动减面</label>
+      <input id="optDecimate" type="checkbox" />
+    </div>
+    <div class="row">
+      <label for="optDecimateRatio">保留比例</label>
+      <input id="optDecimateRatio" type="range" min="0.05" max="1" step="0.05" value="0.5" />
+      <span id="optDecimateRatioOut" class="out">保留 50%</span>
+    </div>
+    <div class="row">
+      <label for="optDecimateError">误差上限</label>
+      <input id="optDecimateError" type="range" min="0.001" max="0.15" step="0.001" value="0.01" />
+      <span id="optDecimateErrorOut" class="out">≤ 1.0%</span>
+    </div>
+    <div class="row">
+      <label for="optDecimateLock">保护轮廓（锁边界）</label>
+      <input id="optDecimateLock" type="checkbox" />
+    </div>
+    <p class="hint">用 meshoptimizer 的 simplifier（wasm 已内嵌，不走网络）：<b>只重写索引</b>，蒙皮权重、
+      UV、多材质分组都保留；误差上限先到就先停，所以"保留比例"是目标而不是保证；小于 64 面的网格不动。</p>
+  </section>
+
   <section class="card">
     <div class="card-head">
       <h2>产物</h2>
@@ -154,7 +183,10 @@
         「配套贴图」里，按文件名自动匹配并<b>内嵌进 GLB</b>；没提供的槽会空着，日志里会写清缺哪个名字。
         <code>.tga</code> / <code>.psd</code> / <code>.dds</code> 浏览器解不了，给同名的
         <code>.png</code> / <code>.jpg</code> 即可（按主干名匹配）。内嵌贴图本来就能正常转换。</li>
-      <li><strong>不做</strong>：不居中、不修朝向、不改骨骼名、不重定向不同骨架的动画。</li>
+      <li><strong>减面</strong>：用 meshoptimizer（wasm 内嵌）做边折叠，<b>保留蒙皮与 UV</b>，只重写索引并压紧
+        顶点；默认关闭。有 morph target 的网格会被跳过（减面会毁掉形变）。法线沿用原顶点法线，强减面后
+        可能有轻微着色误差——真机上看一眼。</li>
+      <li><strong>不做</strong>：不居中、不修朝向、不改骨骼名、不重定向不同骨架的动画、不重算法线、不压缩纹理。</li>
       <li><strong>预览</strong>：需要 WebGL（真机确认项），手机上大模型转动可能掉帧。</li>
     </ul>
   </details>

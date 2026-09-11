@@ -21,7 +21,10 @@ import { formatBytes, outputFileName } from './src/names.js';
 import { resolveScale, scaleLabel, type ScaleDecision } from './src/units.js';
 import { createPanel, type PanelHandle } from './src/panel.js';
 import { createPreview, type PreviewHandle } from './src/preview.js';
-import type { ConvertSettings, PreviewSettings } from './src/settings.js';
+import type { ConvertSettings, DecimateSettings, PreviewSettings } from './src/settings.js';
+import {
+  decimateForExport, decimateSummaryText, type DecimateReport,
+} from './src/decimate.js';
 import {
   IMAGE_EXTENSIONS, externalCounts, isImageFileName, providedFileNames, reportNeedsTextures,
   textureSummaryText, type TextureReport,
@@ -276,6 +279,7 @@ playBtn.addEventListener('click', () => {
 
 // ---- settings panel --------------------------------------------------------------------------
 let lastConvert: ConvertSettings | null = null;
+let lastDecimate: DecimateSettings | null = null;
 const panel: PanelHandle = createPanel({
   els: {
     format: byId<HTMLSelectElement>('optFormat'),
@@ -284,6 +288,13 @@ const panel: PanelHandle = createPanel({
     scale: byId<HTMLSelectElement>('optScale'),
     naming: byId<HTMLSelectElement>('optNaming'),
     convertReset: byId<HTMLButtonElement>('convertReset'),
+    decimate: byId<HTMLInputElement>('optDecimate'),
+    decimateRatio: byId<HTMLInputElement>('optDecimateRatio'),
+    decimateRatioOut: byId<HTMLElement>('optDecimateRatioOut'),
+    decimateError: byId<HTMLInputElement>('optDecimateError'),
+    decimateErrorOut: byId<HTMLElement>('optDecimateErrorOut'),
+    decimateLock: byId<HTMLInputElement>('optDecimateLock'),
+    decimateReset: byId<HTMLButtonElement>('decimateReset'),
     grid: byId<HTMLInputElement>('optGrid'),
     bones: byId<HTMLInputElement>('optBones'),
     speed: byId<HTMLInputElement>('optSpeed'),
@@ -300,6 +311,9 @@ const panel: PanelHandle = createPanel({
     preview?.setBones(s.bones);
     preview?.setSpeed(s.speed);
   },
+  // 减面只在导出时发生（而且是在克隆体上），所以这里不需要往任何模块转发，只记下当前值供按钮文案/
+  // 转换流程读取。拖动滑杆时的实时回调走的是同一个入口。
+  onDecimateChange: (s: DecimateSettings) => { lastDecimate = s; updateConvertState(); },
 });
 
 // ---- conversion ------------------------------------------------------------------------------
@@ -309,6 +323,8 @@ interface Output {
   clips: string[];
   scale: ScaleDecision;
   report: SceneReport;
+  /** 这次导出的减面结果（功能关闭时 applied = 0）。 */
+  decimate: DecimateReport;
   warnings: string[];
   check: SelfCheck | { error: string };
   from: string;
@@ -359,6 +375,14 @@ function renderResults(): void {
     detail.textContent = parts.join(' · ');
     li.appendChild(detail);
 
+    const decimateText = decimateSummaryText(out.decimate);
+    if (decimateText !== '') {
+      const line = document.createElement('div');
+      line.className = 'result-meta' + (out.decimate.applied > 0 ? ' good' : '');
+      line.textContent = decimateText;
+      li.appendChild(line);
+    }
+
     if (out.clips.length > 0) {
       const unbound = out.report.clips.reduce((n, c) => n + c.unbound.length, 0);
       const note = document.createElement('div');
@@ -397,28 +421,48 @@ function renderResults(): void {
   }
 }
 
-/** Export one scene and register the result (including the read-back self-check). */
+/**
+ * Export one scene and register the result (including the read-back self-check).
+ *
+ * 减面发生在这里，而且发生在**克隆体**上：`decimateForExport` 不改动传入的 root，所以预览用的那份
+ * 模型（以及重复点「转换」）不会越减越少。返回的 root 会被用于测量与导出。
+ */
 async function emit(
   from: string, root: any, clips: readonly any[], c: ConvertSettings, warnings: readonly string[] = [],
-): Promise<void> {
-  const report = describeScene(root, clips);
+): Promise<{ decimate: DecimateReport; root: any }> {
+  const d = lastDecimate ?? { enabled: false, ratio: 0.5, error: 0.01, lockBorder: true };
+  const { root: exportRoot, report: decimate } = await decimateForExport(root, d);
+  if (d.enabled) {
+    const text = decimateSummaryText(decimate);
+    log(text !== '' ? text : '减面：没有网格被改动', decimate.applied > 0 ? 'ok' : 'warn');
+    for (const m of decimate.meshes) {
+      if (m.skip === null) {
+        log(`  · ${m.name}：${m.before} → ${m.after} 面，顶点 ${m.vertsBefore} → ${m.vertsAfter}，` +
+          `${m.ms} ms，误差 ${m.error.toExponential(1)}`);
+      } else if (m.skip !== 'tiny' && m.skip !== 'at-target') {
+        log(`  · ${m.name}：跳过（${m.skip}）`, 'warn');
+      }
+    }
+  }
+  const report = describeScene(exportRoot, clips);
   const decision = resolveScale(c.scaleMode, report.size.y);
   if (decision.autoApplied) {
     log(`测得高度 ${decision.height.toFixed(2)} 个单位 → 判定为厘米，导出时 ×${decision.scale}`, 'info');
   }
   const anim = c.animations ? clips : [];
-  const out = await exportScene(root, { format: c.format, animations: anim, scale: decision.scale });
+  const out = await exportScene(exportRoot, { format: c.format, animations: anim, scale: decision.scale });
   const buffer = await out.blob.arrayBuffer();
   const check = await selfCheck(buffer);
   const name = uniqueFileName(from, c.format);
   outputs.push({
     name, blob: out.blob, clips: c.animations ? report.clips.map((x) => x.name) : [],
-    scale: decision, report, warnings: [...warnings], check, from,
+    scale: decision, report, decimate, warnings: [...warnings], check, from,
   });
   log(`写出 ${name}（${formatBytes(out.bytes)}）` +
     ('error' in check ? ` · 自检失败：${check.error}` : ` · 自检通过（${check.bones} 骨骼）`),
   'error' in check ? 'warn' : 'ok');
   renderResults();
+  return { decimate, root: exportRoot };
 }
 
 async function convert(): Promise<void> {
@@ -443,24 +487,22 @@ async function convert(): Promise<void> {
       const baseItem = ready[outcome.baseIndex]!;
       log(`合并完成：${outcome.accepted.length} 个文件、${outcome.clips.length} 个动作 ` +
         `（${outcome.clips.map((x) => x.name).join('、') || '无'}）`, 'ok');
-      await emit(baseItem.file.name, outcome.root, outcome.clips, c, outcome.warnings);
-      // Preview what was just exported (renamed clips included), so the names on screen are the names
-      // in the file.
-      previewSource = { file: baseItem.file.name, root: outcome.root, clips: outcome.clips };
-      setPreview(outcome.root, outcome.clips);
+      const emitted = await emit(baseItem.file.name, outcome.root, outcome.clips, c, outcome.warnings);
+      // Preview what was just exported — renamed clips AND the decimated meshes — so the picture on
+      // screen is the file on disk.
+      previewSource = { file: baseItem.file.name, root: emitted.root, clips: outcome.clips };
+      setPreview(emitted.root, outcome.clips);
     } else {
       // ---- one output per input --------------------------------------------------------------
       for (const item of ready) {
         const loaded = item.loaded!;
         const names = nameClipsForFile(item.file.name, loaded.clips, c.clipNaming);
         const clips = renameClips(loaded.clips, names);
-        await emit(item.file.name, loaded.root, clips, c);
+        const emitted = await emit(item.file.name, loaded.root, clips, c);
+        if (item === ready[0]) { previewSource = { ...loaded, root: emitted.root }; setPreview(emitted.root, clips); }
         // Yield so the log/result rows paint between files (a phone renders nothing otherwise).
         await new Promise((r) => setTimeout(r, 0));
       }
-      const first = ready[0]!;
-      previewSource = first.loaded!;
-      setPreview(first.loaded!.root, first.loaded!.clips);
     }
   } catch (err) {
     log('转换失败：' + (err instanceof Error ? err.message : String(err)), 'error');

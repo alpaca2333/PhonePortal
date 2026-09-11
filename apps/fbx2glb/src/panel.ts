@@ -10,10 +10,11 @@
  */
 import { loadSettings, saveSettings } from '../../../shared/src/settings.js';
 import {
-  type ConvertSettings, type PreviewSettings, type RawSettings,
-  clearConvertGroup, clearPreviewGroup, createState, effectiveConvert, effectivePreview,
-  hasConvertOverrides, hasPreviewOverrides, orientationOf,
-  writeConvertOverride, writePreviewOverride,
+  type ConvertSettings, type DecimateSettings, type PreviewSettings, type RawSettings,
+  DECIMATE_LIMITS, clearConvertGroup, clearDecimateGroup, clearPreviewGroup, createState,
+  effectiveConvert, effectiveDecimate, effectivePreview,
+  hasConvertOverrides, hasDecimateOverrides, hasPreviewOverrides, orientationOf,
+  writeConvertOverride, writeDecimateOverride, writePreviewOverride,
   SPEED_MAX, SPEED_MIN, SPEED_STEP,
 } from './settings.js';
 
@@ -24,6 +25,13 @@ const SAVE_DEBOUNCE_MS = 400;
 
 export interface PanelElements {
   format: HTMLSelectElement;
+  decimate: HTMLInputElement;
+  decimateRatio: HTMLInputElement;
+  decimateRatioOut: HTMLElement;
+  decimateError: HTMLInputElement;
+  decimateErrorOut: HTMLElement;
+  decimateLock: HTMLInputElement;
+  decimateReset: HTMLButtonElement;
   merge: HTMLInputElement;
   animations: HTMLInputElement;
   scale: HTMLSelectElement;
@@ -41,12 +49,15 @@ export interface PanelOptions {
   els: PanelElements;
   onConvertChange: (s: ConvertSettings) => void;
   onPreviewChange: (s: PreviewSettings) => void;
+  /** Called on every decimation change, INCLUDING a slider drag (so the UI can preview the numbers). */
+  onDecimateChange: (s: DecimateSettings) => void;
 }
 
 export interface PanelHandle {
   /** Current effective settings (what a conversion should use). */
   convert(): ConvertSettings;
   preview(): PreviewSettings;
+  decimate(): DecimateSettings;
   /** Re-read the viewport orientation and re-apply (a hand-edited file may differ per orientation). */
   refresh(): void;
   /** Flush any pending save (used before a long conversion, so the value is not lost on navigation). */
@@ -62,6 +73,7 @@ export function createPanel(opts: PanelOptions): PanelHandle {
 
   function convert(): ConvertSettings { return effectiveConvert(raw, orientation); }
   function preview(): PreviewSettings { return effectivePreview(raw, orientation); }
+  function decimate(): DecimateSettings { return effectiveDecimate(raw, orientation); }
 
   function setStatus(text: string, isError = false): void {
     els.status.textContent = text;
@@ -78,6 +90,23 @@ export function createPanel(opts: PanelOptions): PanelHandle {
     els.naming.value = c.clipNaming;
     els.convertReset.disabled = !hasConvertOverrides(raw);
 
+    const dec = decimate();
+    els.decimate.checked = dec.enabled;
+    els.decimateRatio.min = String(DECIMATE_LIMITS.ratio.min);
+    els.decimateRatio.max = String(DECIMATE_LIMITS.ratio.max);
+    els.decimateRatio.step = String(DECIMATE_LIMITS.ratio.step);
+    els.decimateRatio.value = String(dec.ratio);
+    els.decimateRatioOut.textContent = '保留 ' + Math.round(dec.ratio * 100) + '%';
+    els.decimateError.min = String(DECIMATE_LIMITS.error.min);
+    els.decimateError.max = String(DECIMATE_LIMITS.error.max);
+    els.decimateError.step = String(DECIMATE_LIMITS.error.step);
+    els.decimateError.value = String(dec.error);
+    els.decimateErrorOut.textContent = '≤ ' + (dec.error * 100).toFixed(1) + '%';
+    els.decimateLock.checked = dec.lockBorder;
+    els.decimateReset.disabled = !hasDecimateOverrides(raw);
+    // 关掉减面时把三个参数置灰：界面直接反映"这些数现在不影响任何东西"。
+    for (const el of [els.decimateRatio, els.decimateError, els.decimateLock]) el.disabled = !dec.enabled;
+
     const p = preview();
     els.grid.checked = p.grid;
     els.bones.checked = p.bones;
@@ -92,6 +121,7 @@ export function createPanel(opts: PanelOptions): PanelHandle {
   function apply(): void {
     opts.onConvertChange(convert());
     opts.onPreviewChange(preview());
+    opts.onDecimateChange(decimate());
   }
 
   async function flush(): Promise<void> {
@@ -127,6 +157,24 @@ export function createPanel(opts: PanelOptions): PanelHandle {
   els.scale.addEventListener('change', () => change((r) => writeConvertOverride(r, 'scaleMode', els.scale.value)));
   els.naming.addEventListener('change', () => change((r) => writeConvertOverride(r, 'clipNaming', els.naming.value)));
 
+  els.decimate.addEventListener('change', () => change((r) => writeDecimateOverride(r, 'enabled', els.decimate.checked)));
+  els.decimateLock.addEventListener('change', () => change((r) => writeDecimateOverride(r, 'lockBorder', els.decimateLock.checked)));
+  // 两个滑杆：拖动时实时反馈（不落盘），松手才写 —— 和预览速度滑杆同一套做法。
+  els.decimateRatio.addEventListener('input', () => {
+    const v = Number(els.decimateRatio.value);
+    if (!Number.isFinite(v)) return;
+    els.decimateRatioOut.textContent = '保留 ' + Math.round(v * 100) + '%';
+    opts.onDecimateChange({ ...decimate(), ratio: v });
+  });
+  els.decimateRatio.addEventListener('change', () => change((r) => writeDecimateOverride(r, 'ratio', Number(els.decimateRatio.value))));
+  els.decimateError.addEventListener('input', () => {
+    const v = Number(els.decimateError.value);
+    if (!Number.isFinite(v)) return;
+    els.decimateErrorOut.textContent = '≤ ' + (v * 100).toFixed(1) + '%';
+    opts.onDecimateChange({ ...decimate(), error: v });
+  });
+  els.decimateError.addEventListener('change', () => change((r) => writeDecimateOverride(r, 'error', Number(els.decimateError.value))));
+
   els.grid.addEventListener('change', () => change((r) => writePreviewOverride(r, 'grid', els.grid.checked)));
   els.bones.addEventListener('change', () => change((r) => writePreviewOverride(r, 'bones', els.bones.checked)));
   els.speed.addEventListener('input', () => {
@@ -155,6 +203,7 @@ export function createPanel(opts: PanelOptions): PanelHandle {
   }
 
   els.convertReset.addEventListener('click', () => resetGroup(clearConvertGroup, '转换选项已恢复默认'));
+  els.decimateReset.addEventListener('click', () => resetGroup(clearDecimateGroup, '减面选项已恢复默认'));
   els.previewReset.addEventListener('click', () => resetGroup(clearPreviewGroup, '预览选项已恢复默认'));
 
   const refresh = (): void => {
@@ -179,5 +228,5 @@ export function createPanel(opts: PanelOptions): PanelHandle {
     apply();
   })();
 
-  return { convert, preview, refresh, flush };
+  return { convert, preview, decimate, refresh, flush };
 }

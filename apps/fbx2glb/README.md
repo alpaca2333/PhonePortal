@@ -54,6 +54,7 @@ apps/fbx2glb/
 │  ├─ units.ts           # ★纯：单位缩放判定（auto / keep / cm）
 │  ├─ rig.ts             # ★纯：骨骼名匹配（精确 → 归一化，「有歧义就拒绝猜」）与轨道名重写
 │  ├─ textures.ts        # 外部贴图：名字匹配（★纯）、LoadingManager 的 URL 重写、占位槽回填、贴图报告
+│  ├─ decimate.ts        # 自动减面：目标面数/跳过规则（★纯）+ meshoptimizer 调用 + 顶点压紧 + 减面报告
 │  ├─ settings.ts        # ★纯：设置 schema（两组、默认值、稀疏覆盖、脏数据、钳制）
 │  ├─ merge.ts           # 合并规则：挑本体、覆盖率门、重定向轨道、改名（用 three 的 AnimationClip）
 │  ├─ analyze.ts         # 场景报告：计数/尺寸/骨骼名/每个 clip 的未绑定轨道（three，无 DOM）
@@ -226,7 +227,35 @@ Blender / 3ds Max 导出的 FBX 常常把贴图写成**同目录的外部文件*
 `GLTFLoader` 读回来。验证脚本会把产物拆开，断言 `images[0].bufferView` 存在、`uri` 不存在、材质的
 `baseColorTexture` 指向它、BIN chunk 里能找到 PNG 魔数。
 
-### 3.11 其他被否决的做法
+### 3.11 自动减面：只用 meshoptimizer，而且只重写索引
+
+**结论先给数字**（本机实测，`apps/shooter/assets/models/cyber_human.glb`，7520 面、22 个动作）：
+
+| 设置 | 三角面 | 顶点 | 几何字节 | 导出 GLB | 耗时 | 骨架 / UV / 动作 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 不减面（我们自己导出） | 7520 | 7778 | 530KB | 1016KB | 0ms | 25 骨骼 / 10 蒙皮 / 22 clip，全部正常 |
+| 保留 50%，误差 ≤1%，锁边界 | 4146 | 5186 | 373KB | 859KB | 6ms | 同上，**0 条轨道失败** |
+| 保留 20%，误差 ≤1% | 2986 | 4251 | 301KB | 787KB | 2ms | 同上 |
+| 保留 20%，误差 ≤15% | 2364 | 3699 | 259KB | 745KB | 6ms | 同上 |
+| 319k 面合成高模，保留 5% | 15960 | 9169 | — | — | **242ms** | — |
+
+- **为什么是 meshoptimizer 而不是 three 自带的 `SimplifyModifier`**：后者开头的
+  `deleteAttribute` 会把 `skinIndex`/`skinWeight` **直接删掉**（蒙皮角色一减面就变成不会动的静态网格），
+  也不认 UV 缝合线、还丢掉多材质分组。meshoptimizer 的 simplifier **只重写索引缓冲**，顶点/蒙皮/UV 原样
+  有效；再用 `simplifyWithAttributes` 把 uv（权重 1）与蒙皮权重（权重 0.01）交给它当"属性"，它就会避免
+  跨缝合线/权重突变处折叠。gltfpack 用的就是这条路。
+- **"保留比例"是目标而不是保证**：`target_error`（界面上的「误差上限」）先到就先停。上表里"保留 20% +
+  误差 1%"实际只减到 40% —— 想真的减到目标就得放宽误差上限。这条写进了工具的提示文字，因为它违反直觉。
+- **只重写索引还不够**：不用的顶点仍然占体积，所以要**用同一张 remap 表把所有属性一起压紧**
+  （position/normal/uv/uv1/skinIndex/skinWeight…）。这类错位在 three 里是**静默画错**（不抛错、不报几何
+  错误），所以验证脚本钉了四条：所有属性数量一致、索引不越界、**每个顶点蒙皮权重和仍为 1**（错位会立刻
+  破坏这个和）、**原模型一点没变**（减面跑在 `SkeletonUtils.clone` 出来的克隆体上）。
+- **不做的**：不重算法线（沿用原顶点法线，强减面后可能有轻微着色误差——真机看一眼）；有 morph target 的
+  网格**直接跳过**（simplifier 不知道形变目标，减完形变就废了）；小于 **64 面**的网格不动（12 面的盒子
+  减半只是垃圾）；不跨材质分组折叠（分组按各自索引区间分别简化，材质边界成为硬边）。
+- **默认关闭**：减面是有损的，不该默认改变别人的模型。设置项在 `decimate` 组（见第 4 节）。
+
+### 3.12 其他被否决的做法
 
 - **合并时把多个 FBX 的网格也拼进一个场景**：没有必要（角色只需要一套网格），而且会把多份骨架、
   多份材质、多份贴图都塞进产物。
@@ -242,6 +271,11 @@ Blender / 3ds Max 导出的 FBX 常常把贴图写成**同目录的外部文件*
   我们只负责补上它要的那张，不负责猜用途。
 - **把 `.psd` / `.dds` 也解出来**：浏览器解不了，three 也没有解码器，硬做等于自带一个解码库。给用户的
   答案很清楚：「另存成 png/jpg，同名即可」。
+- **用 three 自带的 `SimplifyModifier` 省掉一个依赖**：它会把 `skinIndex`/`skinWeight` 删掉（见 3.11），
+  对"减面后还要能播动画"的角色等于不可用。为一个 55KB、MIT、wasm 内嵌、零网络请求的文件换掉整条减面能力
+  不划算。
+- **做"顶点聚类（vertex clustering）"这种更快的近似减面**：快，但会把 UV 与蒙皮权重一起平均掉，贴图和
+  蒙皮都会坏，而且它对"目标面数"没有控制力。
 - **「恢复默认」只清内存、不落盘**（是这一轮真被 DOM shim 测试抓到的 bug）：面板的 `flush()` 在「没有待写改动」时
   会直接返回，而「恢复默认」只改了内存里的对象、没有把 `dirty` 置起来，于是用户点完恢复默认、刷新页面，
   旧值又回来了——**看起来生效、实际没保存**。修法是 `panel.ts::resetGroup()` 里显式 `dirty = true` 再 `flush()`，
@@ -263,6 +297,10 @@ Blender / 3ds Max 导出的 FBX 常常把贴图写成**同目录的外部文件*
 | | `animations` | 布尔 | `true` | 下一次转换 |
 | | `scaleMode` | `auto` \| `keep` \| `cm` | `auto` | 下一次转换 |
 | | `clipNaming` | `file` \| `clip` | `file` | 下一次转换 |
+| `decimate` 减面 | `enabled` | 布尔 | `false` | 下一次转换（默认关闭：有损操作） |
+| | `ratio` | 0.05–1，步长 0.05（越界钳制、按步长吸附） | `0.5` | 下一次转换 |
+| | `error` | 0.001–0.15（界面显示为 0.1%–15%） | `0.01` | 下一次转换 |
+| | `lockBorder` | 布尔（锁边界 = 保护剪影） | `true` | 下一次转换 |
 | `preview` 预览 | `grid` | 布尔 | `true` | 立即 |
 | | `bones` | 布尔 | `false` | 立即 |
 | | `speed` | 0.1–2，步长 0.1（越界钳制、NaN→1） | `1` | 立即（拖动实时预览，松手才落盘） |
@@ -283,6 +321,7 @@ Blender / 3ds Max 导出的 FBX 常常把贴图写成**同目录的外部文件*
 | `assets/sample.fbx` | `apps/fbx2glb/assets/` | 本仓库自有（无第三方素材） | **手写**的 ASCII FBX 7.4：2 骨骼蒙皮盒子 + 两个 take 都叫 `mixamo.com` 的动画，9KB |
 | `assets/sample-textured.fbx` | `apps/fbx2glb/assets/` | 本仓库自有（无第三方素材） | 同上，但材质引用**外部**贴图 `sample_body_diffuse.png`（贴图分体那条路的样例与测试输入） |
 | `assets/sample_body_diffuse.png` | `apps/fbx2glb/assets/` | 本仓库自有（无第三方素材） | 4×4 的 81 字节 PNG（零依赖生成），既是样例贴图，也是验证脚本证明「图片真被嵌进 GLB」的字节 |
+| [meshoptimizer](https://github.com/zeux/meshoptimizer) 1.2.0（`meshopt_simplifier.js`） | `apps/fbx2glb/vendor/meshopt/` | MIT | 55KB，**wasm 以压缩字符串内嵌在同一个文件里**（不发网络请求、不需要 `.wasm` MIME），只用于自动减面 |
 
 **关于 Mixamo 资产（本应用不内置任何 Mixamo 文件）**：Mixamo 的模型/动画可免费商用、无需署名，
 但其条款要求「**不能作为独立资产再分发**，必须并入更大的作品」。所以：
@@ -309,6 +348,9 @@ Blender / 3ds Max 导出的 FBX 常常把贴图写成**同目录的外部文件*
   - 内嵌贴图（贴图就在 FBX 里）本来就能正常转换，不需要这一步。
 - **不做的**：不居中、不修朝向、不改骨骼名、不重定向不同骨架的动画、不做 in-place 修正、
   不剥手持武器/配件、不烘焙动画、不压缩纹理。
+- **减面**（默认关闭）：见 3.11。「保留比例」是目标不是保证（误差上限先到就先停）；有 morph target 的网格
+  与小于 64 面的网格会被跳过；法线不重算。**减面后长什么样必须真机看一眼**——「面数对了但形变/贴图坏了」
+  是本环境抓不到的那类问题（这里能断言的是蒙皮属性没丢、权重和没坏、动作还能绑）。
 - **不做 in-place 修正的后果**：Mixamo 下载时若不勾 `In Place`，走跑动作自带根位移，
   产物里也会有（消费方自己决定要不要保留）。
 - **three 的 console 警告**：`GLTFExporter` 对 `MeshPhongMaterial`（FBXLoader 的常见产物）
@@ -330,6 +372,9 @@ Blender / 3ds Max 导出的 FBX 常常把贴图写成**同目录的外部文件*
 - **换/加样例**：替换 `assets/sample.fbx`（保持 ASCII、保持小），并同步验证脚本第 6 节的实测数字
   （骨骼数、动作数、高度、take 名）。`assets/sample-textured.fbx` 是它的「外部贴图」变体，两者只有
   材质那几行不同——改一个就要看住另一个，并同步第 12 节的断言（引用名、缺几张、sRGB/wrap/flipY）。
+- **改减面参数/规则**：范围与默认值在 `src/decimate.ts`（`RATIO_*`/`ERROR_*`，`settings.ts` 直接引用它们，
+  所以滑杆范围与实际钳制不可能漂移）；跳过规则是 `skipReasonFor`。改完补第 13 节的断言，并更新 3.11 的实测
+  表（换模型/换库都要重测——那张表是"减面到底值不值"的唯一依据）。
 - **改贴图匹配规则**：`src/textures.ts` 的 `nameKey` / `stemKey` / `matchTexture` 都是纯函数，
   改完在验证脚本第 12.1 节补断言；`URL 重写` 与 `占位槽回填` 两条路线的新行为放 12.2/12.3。
 - **升级 three**：整个 `vendor/` 一起换（含 addons），更新 `vendor/README.md` 的版本与 md5，
@@ -343,7 +388,7 @@ Blender / 3ds Max 导出的 FBX 常常把贴图写成**同目录的外部文件*
 
 | 改动 | 跑什么 |
 | --- | --- |
-| 本应用的任何逻辑 / DOM / 设置 / 样例 | `node scripts/verify-fbx2glb.mjs`（**320 项断言**，1 个脚本） |
+| 本应用的任何逻辑 / DOM / 设置 / 样例 | `node scripts/verify-fbx2glb.mjs`（**376 项断言**，1 个脚本） |
 | `shared/src/settings.ts`、`server/`、`shell/`、`scripts/`、vendor | **全套**（21 个脚本；`verify-spawn-cost.mjs` 需要 `--expose-gc`） |
 
 另外每次都做：`curl` 具体 URL、写明真机确认项（AGENTS.md 启动与验证 第 3、5 条）。
@@ -382,7 +427,13 @@ curl -s http://localhost:3000/api/settings/fbx2glb
    内部断言（`images[0].bufferView` + 无 `uri` + `baseColorTexture` 指向它 + BIN 里有 PNG 魔数）；
    UI 层也走过一遍（「载入样例（外部贴图）」→ 贴图行标记「已用于贴图」→ 日志写出「谁补了谁」→
    混着拖 FBX 与图片时按扩展名分流）。
-9. **构建新鲜度**：脚本第 0 节断言 `dist/apps/fbx2glb` 比源码新——本脚本读 `dist/`，陈旧的构建只会测到
+9. **自动减面也是端到端验证的**（第 13 节）：纯规则（目标面数；跳过规则：太小 / 已达标 / 有 morph /
+   没有几何体）、在一个**合成的 6016 面蒙皮球**上真减到 3008 面（−50%），并断言「所有属性按同一张 remap 表
+   压紧」「索引不越界」「每个顶点蒙皮权重和仍为 1」「原模型一点没变」，减面后的 GLB 更小（212KB → 129KB）
+   且能被 `GLTFLoader` 读回（仍 1 蒙皮网格 / 2 骨骼 / 动作在 / JOINTS+WEIGHTS+TEXCOORD 都在）；关闭时原样
+   返回、只有小网格时报告「都小于下限」而不是假装减过；UI 层也走了一遍（开关落盘两个方向、拖动不落盘松手
+   才写、日志说明为什么没减、恢复默认回到 0.5）。
+10. **构建新鲜度**：脚本第 0 节断言 `dist/apps/fbx2glb` 比源码新——本脚本读 `dist/`，陈旧的构建只会测到
    上一个版本（这次真踩过一次：改完 `main.ts` 没等 watcher 构建完就重跑，得到一次假失败）。
 
 8. **页面真的能跑**：`scripts/verify-fbx2glb.mjs` 最后一节用 DOM shim 启动**真实的 `dist/apps/fbx2glb/main.js`**

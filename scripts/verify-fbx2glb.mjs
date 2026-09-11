@@ -724,8 +724,9 @@ section('10. 产物不变量：本地转换、DOM 契约、vendor');
   check(fetches.every((f) => f.includes("'./assets/")), '每一处 fetch 都指向应用自带的样例资源（用户文件永不上传/下载）',
     fetches.join(' | '));
 
-  const referenced = [...new Set([...js.matchAll(/vendor\/addons\/[A-Za-z0-9_/.\[\]-]+\.js/g)].map((m) => m[0]))];
-  check(referenced.length >= 4, '源码里引用了 ' + referenced.length + ' 个 vendor addon');
+  const referenced = [...new Set([...js.matchAll(/vendor\/(?:addons\/[A-Za-z0-9_/.\[\]-]+|meshopt\/[A-Za-z0-9_.-]+)\.js/g)].map((m) => m[0]))];
+  check(referenced.length >= 5, '源码里引用了 ' + referenced.length + ' 个 vendor 模块（three addon + meshoptimizer）',
+    referenced.join(' '));
   const absent = referenced.filter((p) => !existsSync(new URL('../dist/apps/fbx2glb/' + p, import.meta.url)));
   check(absent.length === 0, '引用到的 vendor addon 都在 dist 里', absent.join(','));
 
@@ -926,6 +927,39 @@ section('11. 装配层：DOM shim 启动真实 main.js，跑完整用户流程')
     const second = elements.get('results').children[0].textContent;
     check(second.includes('sample.gltf'), '第二次产物是 .gltf（设置真的生效了）', second.slice(0, 60));
     check(elements.get('results').children.length === 1, '重新转换会清空上一次的产物');
+
+    // ---- 减面卡片：设置 → 落盘 → 导出 → 日志 ----
+    check(elements.get('optDecimate').checked === false, '减面默认关闭（有损操作不默认开启）');
+    check(elements.get('optDecimateRatio').disabled === true, '关闭时参数置灰：界面直接反映「这些数现在不起作用」');
+    check(elements.get('decimateReset').disabled === true, '没有覆盖项时「恢复默认」置灰');
+    const putsBeforeDecimate = puts.length;
+    elements.get('optDecimate').checked = true;
+    elements.get('optDecimate').dispatch('change');
+    await new Promise((r) => realSetTimeout(r, 600));
+    check(puts.length === putsBeforeDecimate + 1, '改减面开关会落盘（防抖后一次）');
+    check(puts[puts.length - 1]?.decimate?.portrait?.enabled === true &&
+      puts[puts.length - 1]?.decimate?.landscape?.enabled === true, 'PUT 里两个方向都写了 true',
+      JSON.stringify(puts[puts.length - 1]?.decimate));
+    check(elements.get('optDecimateRatio').disabled === false, '打开后参数可用');
+    const putsBeforeDrag = puts.length;
+    elements.get('optDecimateRatio').value = '0.25';
+    elements.get('optDecimateRatio').dispatch('input');
+    check(elements.get('optDecimateRatioOut').textContent.includes('25%'), '拖动时读数实时更新',
+      elements.get('optDecimateRatioOut').textContent);
+    check(puts.length === putsBeforeDrag, '拖动过程中不落盘（松手才写）');
+    elements.get('optDecimateRatio').dispatch('change');
+    await new Promise((r) => realSetTimeout(r, 600));
+    check(puts[puts.length - 1]?.decimate?.portrait?.ratio === 0.25, '松手后写入比例',
+      JSON.stringify(puts[puts.length - 1]?.decimate));
+    elements.get('convertBtn').dispatch('click');
+    await settle(150);
+    check(logText().includes('没有网格需要减面'), '日志解释了为什么没减（样例只有 12 面的盒子，低于下限）',
+      logText().slice(-180));
+    elements.get('decimateReset').dispatch('click');
+    await new Promise((r) => realSetTimeout(r, 600));
+    check(elements.get('optDecimate').checked === false, '恢复默认把减面关回去');
+    check(elements.get('optDecimateRatio').value === '0.5', '比例回到 0.5（默认）',
+      elements.get('optDecimateRatio').value);
 
     // ---- 多文件 + 「不合并」：一个输入一个产物，各自按自己的文件名命名 ----
     const filesBefore = elements.get('fileList').children.length;
@@ -1168,6 +1202,156 @@ section('12. 外部贴图：名字匹配 → 材质槽 → 内嵌进 GLB');
   } finally {
     globalThis.document = realDocument;
   }
+}
+
+// =============================================================================================
+// 13. 自动减面：meshoptimizer（保蒙皮/UV）+ 只重写索引 + 压紧顶点
+// =============================================================================================
+// WHY THIS SECTION IS SHAPED THIS WAY: three 自带的 SimplifyModifier 会 `deleteAttribute` 掉
+// skinIndex/skinWeight（角色一减面就变成不会动的静态网格），所以这里用的是 vendored meshoptimizer。
+// 它只重写索引，因此蒙皮/UV 天然有效——但"不用的顶点仍然占体积"，所以要自己压紧；压紧必须用**同一张
+// remap 表**过滤所有属性，而这类错位在 three 里是"静默画错"（不会抛错、不会有几何报错），只能靠断言抓：
+//   * 每个属性过滤后的 count 必须都等于新顶点数；
+//   * 索引不能越界；
+//   * 蒙皮权重每个顶点仍然和为 1（错位就会破坏这个和）；
+//   * 原模型必须一点没变（减面跑在克隆体上）。
+section('13. 自动减面');
+{
+  const decimate = await import(new URL('../dist/apps/fbx2glb/src/decimate.js', import.meta.url).href);
+
+  // ---- 13.1 纯规则 ----
+  check(decimate.targetTriangles(1000, 0.5) === 500, '目标面数 = 原面数 × 比例');
+  check(decimate.targetTriangles(1000, 1) === 1000, '比例 1 → 不减');
+  check(decimate.targetTriangles(10, 0.05) === 1, '极小网格的目标至少 1 面（不会变成 0）');
+  check(decimate.targetTriangles(1000, 99) === 1000, '脏比例被钳到 1');
+  const idxGeo = new THREE.BufferGeometry();
+  idxGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(36), 3)); // 12 顶点
+  check(decimate.triangleCount(idxGeo) === 4, '无索引时按 position 三元组数面', String(decimate.triangleCount(idxGeo)));
+  idxGeo.setIndex([0, 1, 2, 1, 2, 3]);
+  check(decimate.triangleCount(idxGeo) === 2, '有索引时按索引数面');
+  const tinyMesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1));
+  check(decimate.skipReasonFor(tinyMesh, 6) === 'tiny', '小于下限的网格跳过（12 面的盒子不该被减）');
+  check(decimate.skipReasonFor({ geometry: undefined }, 6) === 'no-index', '没有几何体 → 跳过');
+  const morphGeo = new THREE.BoxGeometry(1, 1, 1);
+  morphGeo.morphAttributes.position = [new THREE.Float32BufferAttribute(new Float32Array(morphGeo.getAttribute('position').count * 3), 3)];
+  check(decimate.skipReasonFor({ geometry: morphGeo }, 6) === 'morph', '有 morph target → 跳过（减面会毁掉形变）');
+  const bigGeo = new THREE.SphereGeometry(1, 40, 30);
+  check(decimate.skipReasonFor({ geometry: bigGeo }, 200) === null, '够大且目标更小 → 该减');
+  check(decimate.skipReasonFor({ geometry: bigGeo }, decimate.triangleCount(bigGeo) + 1) === 'at-target',
+    '目标不小于原面数 → 跳过');
+
+  // ---- 13.2 真减面：合成的高模蒙皮网格（带 uv + skinIndex/skinWeight + 动画片段） ----
+  const sphereGeo = new THREE.SphereGeometry(1, 64, 48);
+  const vcount = sphereGeo.getAttribute('position').count;
+  const skinIndices = new Uint16Array(vcount * 4);
+  const skinWeights = new Float32Array(vcount * 4);
+  for (let i = 0; i < vcount; i++) {
+    skinIndices[i * 4] = 0; skinIndices[i * 4 + 1] = 1;
+    skinWeights[i * 4] = 0.5; skinWeights[i * 4 + 1] = 0.5;
+  }
+  sphereGeo.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(skinIndices, 4));
+  sphereGeo.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeights, 4));
+  const boneA = new THREE.Bone(); boneA.name = 'mixamorigHips';
+  const boneB = new THREE.Bone(); boneB.name = 'mixamorigSpine'; boneB.position.set(0, 0.8, 0);
+  boneA.add(boneB);
+  const skinned = new THREE.SkinnedMesh(sphereGeo, new THREE.MeshStandardMaterial({ name: 'BodyMat' }));
+  skinned.name = 'Body';
+  skinned.add(boneA);
+  skinned.bind(new THREE.Skeleton([boneA, boneB]));
+  const rig = new THREE.Group();
+  rig.add(skinned);
+  const clip = new THREE.AnimationClip('idle', 1, [
+    new THREE.QuaternionKeyframeTrack('mixamorigHips.quaternion', [0, 1], [0, 0, 0, 1, 0, 0.2, 0, 0.98]),
+  ]);
+  const trisBefore = decimate.triangleCount(sphereGeo);
+  check(trisBefore > 5000, '合成网格够大（' + trisBefore + ' 面）');
+
+  const { root: thinned, report } = await decimate.decimateForExport(rig, {
+    enabled: true, ratio: 0.5, error: 0.01, lockBorder: true,
+  });
+  check(report.available, 'meshoptimizer 的 wasm 起来了（vendor 的内嵌 wasm，不走网络）');
+  check(report.applied === 1, '减了 1 个网格', String(report.applied));
+  check(report.trisAfter < trisBefore * 0.75 && report.trisAfter > trisBefore * 0.25,
+    `面数落在目标附近：${trisBefore} → ${report.trisAfter}`);
+  check(decimate.triangleCount(skinned.geometry) === trisBefore,
+    '原模型的几何体一点没变（减面只发生在克隆体上）');
+  check(thinned !== rig, '返回的是克隆体');
+  const thinMesh = thinned.getObjectByName('Body');
+  check(!!thinMesh && thinMesh.isSkinnedMesh, '克隆出来的仍然是 SkinnedMesh');
+  check(thinMesh.geometry.getAttribute('skinIndex') && thinMesh.geometry.getAttribute('skinWeight'),
+    '蒙皮属性被保留（three 自带的 SimplifyModifier 会把这些 delete 掉）');
+  const vertsAfter = thinMesh.geometry.getAttribute('position').count;
+  const counts = Object.entries(thinMesh.geometry.attributes)
+    .map(([name, a]) => name + ':' + a.count).join(' ');
+  const allMatch = Object.values(thinMesh.geometry.attributes).every((a) => a.count === vertsAfter);
+  check(allMatch, '所有属性都按同一张 remap 表压紧（数量一致）', counts);
+  check(!!thinMesh.geometry.getAttribute('uv'), 'uv 被保留');
+  const maxIndex = Math.max(...thinMesh.geometry.index.array);
+  check(maxIndex < vertsAfter, '索引没有越界', maxIndex + ' < ' + vertsAfter);
+  // 权重和 = 1：只要 skinIndex/skinWeight 的压紧错位，这个和立刻就不对了
+  const w = thinMesh.geometry.getAttribute('skinWeight');
+  let worstSum = 0;
+  for (let i = 0; i < vertsAfter; i++) {
+    const sum = w.array[i * 4] + w.array[i * 4 + 1] + w.array[i * 4 + 2] + w.array[i * 4 + 3];
+    worstSum = Math.max(worstSum, Math.abs(1 - sum));
+  }
+  check(worstSum < 1e-3, '每个顶点蒙皮权重和仍然是 1（属性没有错位）', 'max |1-sum| = ' + worstSum.toExponential(1));
+  let thinBones = 0, thinSkinned = 0;
+  thinned.traverse((o) => { if (o.isBone) thinBones++; if (o.isSkinnedMesh) thinSkinned++; });
+  check(thinBones === 2 && thinSkinned === 1, '骨骼层级完整', `bones=${thinBones} skinned=${thinSkinned}`);
+  check(analyze.unboundTracks(thinned, clip).length === 0, '减面后动画片段仍然能绑定到骨骼');
+  check(report.meshes[0].ms >= 0 && report.meshes[0].error >= 0, '报告里有耗时与几何误差',
+    JSON.stringify(report.meshes[0]));
+  check(decimate.decimateSummaryText(report).includes('→'), '摘要写出 before → after',
+    decimate.decimateSummaryText(report));
+
+  // ---- 13.3 减面后的产物仍然可读回，且真的变小 ----
+  const outPlain = await convert.exportScene(rig, { format: 'glb', animations: [clip], scale: 1 });
+  const outThin = await convert.exportScene(thinned, { format: 'glb', animations: [clip], scale: 1 });
+  check(outThin.bytes < outPlain.bytes, '减面后的 GLB 更小',
+    names.formatBytes(outPlain.bytes) + ' → ' + names.formatBytes(outThin.bytes));
+  const checkThin = await convert.selfCheck(await outThin.blob.arrayBuffer());
+  check(!('error' in checkThin), 'GLTFLoader 能读回减面后的产物', 'error' in checkThin ? checkThin.error : '');
+  if (!('error' in checkThin)) {
+    check(checkThin.skinned === 1 && checkThin.bones === 2, '读回后仍然是 1 个蒙皮网格 + 2 根骨骼',
+      JSON.stringify(checkThin));
+    check(JSON.stringify(checkThin.clipNames) === JSON.stringify(['idle']), '动作也还在');
+  }
+  const thinJson = convert.readGlb(await outThin.blob.arrayBuffer()).json;
+  const prim = thinJson.meshes[0].primitives[0];
+  check(!!prim.attributes.JOINTS_0 && !!prim.attributes.WEIGHTS_0 && !!prim.attributes.TEXCOORD_0,
+    'glTF 里 JOINTS/WEIGHTS/TEXCOORD 都在', JSON.stringify(Object.keys(prim.attributes)));
+  const thinTris = thinJson.accessors[prim.indices].count / 3;
+  check(thinTris < trisBefore, 'glTF 里的三角面数确实变少了', Math.round(thinTris) + ' < ' + trisBefore);
+
+  // ---- 13.4 关闭 / 降级路径 ----
+  const offRes = await decimate.decimateForExport(rig, { enabled: false, ratio: 0.5, error: 0.01, lockBorder: true });
+  check(offRes.root === rig && offRes.report.applied === 0 && offRes.report.reason === 'disabled',
+    '功能关闭时原样返回，不做任何改动');
+  check(decimate.decimateSummaryText(offRes.report) === '', '关闭时摘要为空（界面不显示这一行）');
+  const tinyRes = await decimate.decimateForExport(tinyMesh, { enabled: true, ratio: 0.5, error: 0.01, lockBorder: true });
+  check(tinyRes.report.applied === 0 && tinyRes.report.reason === 'tiny',
+    '只有小网格时报告「都小于下限」，而不是假装减过', JSON.stringify(tinyRes.report.reason));
+  check(decimate.decimateSummaryText(tinyRes.report).includes('小于'), '摘要解释了为什么没减',
+    decimate.decimateSummaryText(tinyRes.report));
+
+  // ---- 13.5 设置 schema ----
+  check(JSON.stringify(settings.decimateDefaults()) ===
+    JSON.stringify({ enabled: false, ratio: 0.5, error: 0.01, lockBorder: true }),
+    '减面默认关闭（有损操作不该默认改别人的模型）', JSON.stringify(settings.decimateDefaults()));
+  const draw = {};
+  settings.writeDecimateOverride(draw, 'enabled', true);
+  check(draw.decimate.portrait.enabled === true && draw.decimate.landscape.enabled === true,
+    '减面设置也是两个方向都写');
+  check(settings.effectiveDecimate(draw, 'portrait').enabled === true, '读回减面覆盖值');
+  check(settings.hasDecimateOverrides(draw), 'hasDecimateOverrides 为真');
+  const clamped = settings.effectiveDecimate({ decimate: { portrait: { ratio: 9, error: -1, lockBorder: 'x' } } }, 'portrait');
+  check(clamped.ratio === 1 && clamped.error === 0.001 && clamped.lockBorder === true,
+    '脏数据被钳制/回落到默认', JSON.stringify(clamped));
+  const snapped = settings.effectiveDecimate({ decimate: { portrait: { ratio: 0.52 } } }, 'portrait');
+  check(Math.abs(snapped.ratio - 0.5) < 1e-9, '比例按步长吸附', String(snapped.ratio));
+  settings.clearDecimateGroup(draw);
+  check(!settings.hasDecimateOverrides(draw), '减面组恢复默认');
 }
 
 // =============================================================================================

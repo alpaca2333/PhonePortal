@@ -9,6 +9,7 @@
  *
  * Two groups, scope `fbx2glb`:
  *   - `convert` → 转换选项: output format, merge, animations, unit scale, clip naming
+ *   - `decimate` → 减面: on/off, keep ratio, error ceiling, silhouette lock
  *   - `preview` → 预览: grid, bone display, playback speed
  *
  * ⚠️ THE `<orientation>` LEVEL IS PRESENT BUT HAS NO SEMANTICS HERE — and that is deliberate, so it
@@ -23,6 +24,11 @@
  */
 
 import { SCALE_MODES, type ScaleMode } from './units.js';
+// 减面的范围/步长/默认值由 decimate.ts（真正消费这些数的地方）拥有，滑杆范围与实际钳制因此不可能漂移。
+import {
+  DECIMATE_LOCK_BORDER_DEFAULT, ERROR_DEFAULT, ERROR_MAX, ERROR_MIN, ERROR_STEP,
+  RATIO_DEFAULT, RATIO_MAX, RATIO_MIN, RATIO_STEP,
+} from './decimate.js';
 
 export type Orientation = 'portrait' | 'landscape';
 export const ORIENTATIONS: readonly Orientation[] = ['portrait', 'landscape'];
@@ -140,6 +146,92 @@ export function effectiveConvert(raw: RawSettings, o: Orientation): ConvertSetti
 /** Is any convert value overridden in EITHER orientation? (drives 「恢复默认」's enabled state) */
 export function hasConvertOverrides(raw: RawSettings): boolean {
   return ORIENTATIONS.some((o) => Object.keys(readConvertOverrides(raw, o)).length > 0);
+}
+
+// ---------------------------------------------------------------------------
+// decimate group —— 自动减面
+// ---------------------------------------------------------------------------
+// 三个数 + 一个开关。`ratio` 是"想保留多少"，`error` 是"最多允许变形多少"——后者才是真正的限制项
+// （误差先到就先停，所以 20% 的目标在 1% 误差下可能只减到 40%，实测见 apps/fbx2glb/README.md）。
+export interface DecimateSettings {
+  enabled: boolean;
+  /** 保留比例（0.05–1）。 */
+  ratio: number;
+  /** 误差上限（相对模型尺寸，0.001–0.15）。 */
+  error: number;
+  /** 锁边界（保护剪影）。 */
+  lockBorder: boolean;
+}
+
+export const DECIMATE_GROUP = 'decimate';
+export const DECIMATE_KEYS = ['enabled', 'ratio', 'error', 'lockBorder'] as const;
+export type DecimateKey = (typeof DECIMATE_KEYS)[number];
+
+/** 滑杆范围/步长，来自 decimate.ts。 */
+export const DECIMATE_LIMITS: Record<'ratio' | 'error', { min: number; max: number; step: number }> = {
+  ratio: { min: RATIO_MIN, max: RATIO_MAX, step: RATIO_STEP },
+  error: { min: ERROR_MIN, max: ERROR_MAX, step: ERROR_STEP },
+};
+
+/** 出厂默认：**关闭**——减面是有损的，不能默认改变别人的模型。 */
+export function decimateDefaults(): DecimateSettings {
+  return { enabled: false, ratio: RATIO_DEFAULT, error: ERROR_DEFAULT, lockBorder: DECIMATE_LOCK_BORDER_DEFAULT };
+}
+
+/** 钳制 + 按步长吸附（脏数据/手改文件都从这里过）。 */
+export function clampDecimate(s: DecimateSettings): DecimateSettings {
+  const snap = (v: number, lim: { min: number; max: number; step: number }, fallback: number): number => {
+    if (!Number.isFinite(v)) return fallback;
+    const clamped = v < lim.min ? lim.min : v > lim.max ? lim.max : v;
+    return Math.round(clamped / lim.step) * lim.step;
+  };
+  return {
+    enabled: s.enabled === true,
+    ratio: snap(s.ratio, DECIMATE_LIMITS.ratio, RATIO_DEFAULT),
+    error: snap(s.error, DECIMATE_LIMITS.error, ERROR_DEFAULT),
+    lockBorder: s.lockBorder !== false,
+  };
+}
+
+function validDecimateValue(key: DecimateKey, value: unknown): string | number | boolean | undefined {
+  if (key === 'enabled' || key === 'lockBorder') return typeof value === 'boolean' ? value : undefined;
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+export function readDecimateOverrides(raw: RawSettings, o: Orientation): Partial<DecimateSettings> {
+  const group = raw[DECIMATE_GROUP];
+  if (!isPlainObject(group)) return {};
+  const src = group[o];
+  if (!isPlainObject(src)) return {};
+  const out: Partial<DecimateSettings> = {};
+  for (const k of DECIMATE_KEYS) {
+    const v = validDecimateValue(k, src[k]);
+    if (v !== undefined) (out as Record<string, unknown>)[k] = v;
+  }
+  return out;
+}
+
+/** 写入两个方向（与 convert/preview 同理：这些值没有方向语义）。 */
+export function writeDecimateOverride(raw: RawSettings, key: DecimateKey, value: unknown): void {
+  if (!isPlainObject(raw[DECIMATE_GROUP])) raw[DECIMATE_GROUP] = {};
+  const group = raw[DECIMATE_GROUP] as Record<string, unknown>;
+  for (const o of ORIENTATIONS) {
+    if (!isPlainObject(group[o])) group[o] = {};
+    (group[o] as Record<string, unknown>)[key] = value;
+  }
+}
+
+export function clearDecimateGroup(raw: RawSettings): void {
+  delete raw[DECIMATE_GROUP];
+}
+
+/** 默认值 ⊕ 稀疏覆盖 ⊕ 钳制。 */
+export function effectiveDecimate(raw: RawSettings, o: Orientation): DecimateSettings {
+  return clampDecimate({ ...decimateDefaults(), ...readDecimateOverrides(raw, o) });
+}
+
+export function hasDecimateOverrides(raw: RawSettings): boolean {
+  return ORIENTATIONS.some((o) => Object.keys(readDecimateOverrides(raw, o)).length > 0);
 }
 
 // ---------------------------------------------------------------------------
